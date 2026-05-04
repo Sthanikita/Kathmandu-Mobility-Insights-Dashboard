@@ -1,5 +1,8 @@
 streamlit
-folium
 streamlit-folium
+streamlit-plotly-events
+folium
 pandas
+sqlalchemy
+plotly
 numpy
