@@ -21,9 +21,7 @@ st.markdown(
 
 # ================= DB =================
 def get_engine():
-    return sqlalchemy.create_engine(
-        "postgresql://postgres:Shresthaniki9742@localhost:5432/GTFS_KATHMANDU"
-    )
+    return sqlalchemy.create_engine(st.secrets["DB_URL"])
 
 # ================= DATA =================
 @st.cache_data
