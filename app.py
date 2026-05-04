@@ -150,7 +150,7 @@ def route_durations():
 
 # ================= APP =================
 st.set_page_config(layout="wide")
-st.title("🚌 Kathmandu Mobility Insights Dashboard")
+st.title("🚌 Kathmandu Valley Mobility Insights Dashboard")
 
 # ================= CONGESTION =================
 df_cong = fetch_congestion()
