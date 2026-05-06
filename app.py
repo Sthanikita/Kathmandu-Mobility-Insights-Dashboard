@@ -526,7 +526,7 @@ with col_map1:
         hub_layer.add_to(m1)
 
         # ================= LAYER CONTROL =================
-        folium.LayerControl(collapsed=False).add_to(m1)
+        folium.LayerControl(collapsed=True).add_to(m1)
 
         # ================= RENDER =================
         st_folium(m1, use_container_width=True, height=800)
