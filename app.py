@@ -283,7 +283,7 @@ if "selected_route_id" not in st.session_state:
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ================= 4 COLUMNS =================
-col1, col2, col3, col4 = st.columns([1.2, 0.8, 1.2, 1.2])
+col1, col2, col3, col4 = st.columns([1.2, 0.6, 1.2, 1.2])
 
 # ================= COL 1: PIE =================
 with col1:
@@ -300,7 +300,7 @@ with col1:
     fig_pie.update_layout(height=400, margin=dict(t=30, b=10, l=20, r=20))
 
     fig_pie.update_traces(
-        textinfo='percent+label',
+        textinfo='percent',
         pull=[0.2 if r == st.session_state.selected_route_id else 0 for r in top5["route_id"]]
     )
     
@@ -384,7 +384,7 @@ with col4:
     )
 
     fig_start.update_traces(
-        line=dict(color="#e9f420", width=6),
+        line=dict(color="RED", width=6),
         marker=dict(size=10),
         textposition="top center"
     )
