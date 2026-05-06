@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit as st 
 from streamlit_folium import st_folium
 from streamlit_plotly_events import plotly_events
 import folium
@@ -8,17 +8,39 @@ import sqlalchemy
 import plotly.express as px
 
 # ================= STYLE FIX =================
-st.markdown(
-    """
-    <style>
-    .block-container {
-        padding-top: 1rem;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown("""
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+html, body, [class*="css"]  {
+    font-family: 'Inter', sans-serif;
+}
+.leaflet-control-layers {
+    font-family: 'Inter', sans-serif !important;
+}
+.block-container {
+    padding-top: 1rem;
+}
+            /* Plotly */
+.js-plotly-plot, .plotly, .plot-container {
+    font-family: 'Inter', sans-serif !important;
+}
 
+/* Leaflet */
+.leaflet-container,
+.leaflet-popup-content,
+.leaflet-control {
+    font-family: 'Inter', sans-serif !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<style>
+.leaflet-control-layers {
+    z-index: 9999 !important;
+}
+</style>
+""", unsafe_allow_html=True)
 # ================= DB =================
 def get_engine():
     return sqlalchemy.create_engine(st.secrets["DB_URL"])
@@ -27,26 +49,49 @@ def get_engine():
 @st.cache_data
 def fetch_kpi():
     engine = get_engine()
-    return {
-        "routes": pd.read_sql("SELECT COUNT(*) FROM routes", engine).iloc[0, 0],
-        "trips": pd.read_sql("SELECT COUNT(*) FROM trips", engine).iloc[0, 0],
-        "stops": pd.read_sql("SELECT COUNT(*) FROM stops", engine).iloc[0, 0],
-        "agency": pd.read_sql("SELECT COUNT(*) FROM agency", engine).iloc[0, 0],
-    }
+    return pd.read_sql("""
+        SELECT 
+            (SELECT COUNT(*) FROM routes) AS routes,
+            (SELECT COUNT(*) FROM trips) AS trips,
+            (SELECT COUNT(*) FROM stops) AS stops,
+            (SELECT COUNT(*) FROM agency) AS agency
+    """, engine).iloc[0].to_dict()
 
+# ================= CONGESTION =================
 @st.cache_data
 def fetch_congestion():
     engine = get_engine()
     return pd.read_sql("""
         SELECT 
-            hour,
-            gps_points,
-            active_vehicles,
-            avg_speed,
-            congestion_index
-        FROM peakdataanalysis
+            EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) AS hour,
+
+            COUNT(*) AS gps_points,
+
+            COUNT(DISTINCT "Location") AS active_vehicles,
+
+            AVG(
+                CAST(REPLACE("Speed", 'km/h', '') AS FLOAT)
+            ) AS avg_speed,
+
+            COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT "Location"), 0) AS congestion_index,
+
+            CASE 
+                WHEN EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) BETWEEN 5 AND 9 
+                    THEN 'Morning Peak (5–9)'
+                WHEN EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) BETWEEN 10 AND 15 
+                    THEN 'Midday Flow (10–15)'
+                WHEN EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) BETWEEN 16 AND 19 
+                    THEN 'Evening Peak (16–19)'
+                ELSE 'Night Low (20–4)'
+            END AS time_block
+
+        FROM clustered_gps_points
+
+        GROUP BY hour
+
         ORDER BY hour
     """, engine)
+
 # ================= MARKET SHARE =================
 @st.cache_data
 def routes_per_agency():
@@ -54,18 +99,17 @@ def routes_per_agency():
     return pd.read_sql("""
         SELECT 
             COALESCE(a.agency_name, 'Unknown') AS agency_name,
-            COUNT(r.route_id) AS route_count
+            COUNT(r.route_id) AS route_count,
+            ROUND(
+                COUNT(r.route_id) * 100.0 / SUM(COUNT(r.route_id)) OVER (),
+                2
+            ) AS percentage
         FROM routes r
         LEFT JOIN agency a ON r.agency_id = a.agency_id
         GROUP BY a.agency_name
         ORDER BY route_count DESC
     """, engine)
 
-def market_share_calc(df):
-    total = df["route_count"].sum()
-    df["percentage"] = (df["route_count"] / total) * 100
-    top = df.iloc[0]
-    return top["agency_name"], top["percentage"]
 
 @st.cache_data
 def fetch_routes():
@@ -82,6 +126,23 @@ def fetch_agencies():
         "SELECT agency_id, agency_name FROM agency",
         engine
     )
+
+# ================= STARTING STOPS (NEW FEATURE) =================
+@st.cache_data
+def fetch_starting_stops():
+    engine = get_engine()
+    return pd.read_sql("""
+        SELECT 
+    s.stop_name,
+    COUNT(DISTINCT st.trip_id) AS trips_starting_at_stop
+FROM stop_times st
+JOIN stops s
+    ON st.stop_id = s.stop_id
+WHERE st.stop_sequence = 1
+GROUP BY s.stop_name
+ORDER BY trips_starting_at_stop DESC
+LIMIT 5;
+    """, engine)
 
 @st.cache_data
 def route_geom(route_id):
@@ -121,70 +182,48 @@ def hubs():
 # ================= ROUTE DURATION =================
 @st.cache_data
 def route_durations():
-    engine = get_engine()
-
-    df = pd.read_sql("""
+    return pd.read_sql("""
         SELECT 
             t.route_id,
-            MIN(st.departure_time) AS start_time,
-            MAX(st.arrival_time) AS end_time
+            (
+                EXTRACT(EPOCH FROM MAX(st.arrival_time)::time) -
+                EXTRACT(EPOCH FROM MIN(st.departure_time)::time)
+            ) / 60 AS duration
         FROM trips t
         JOIN stop_times st ON t.trip_id = st.trip_id
         GROUP BY t.route_id
-    """, engine)
-
-    def to_minutes(t):
-        try:
-            h, m, s = map(int, str(t).split(":"))
-            return h * 60 + m + s / 60
-        except:
-            return None
-
-    df["start_min"] = df["start_time"].apply(to_minutes)
-    df["end_min"] = df["end_time"].apply(to_minutes)
-    df["duration"] = df["end_min"] - df["start_min"]
-
-    return df.dropna(subset=["duration"])
+        HAVING 
+            MIN(st.departure_time) IS NOT NULL 
+            AND MAX(st.arrival_time) IS NOT NULL
+    """, get_engine())
 
 # ================= APP =================
 st.set_page_config(layout="wide")
 st.title("🚌 Kathmandu Valley Mobility Insights Dashboard")
 
-# ================= CONGESTION =================
+# ================= LOAD DATA =================
 df_cong = fetch_congestion()
-
-# time grouping
-def classify_hour(h):
-    if 5 <= h <= 9:
-        return "Morning Peak (5–9)"
-    elif 10 <= h <= 15:
-        return "Midday Flow (10–15)"
-    elif 16 <= h <= 19:
-        return "Evening Peak (16–19)"
-    else:
-        return "Night Low (20–4)"
-
-df_cong["time_block"] = df_cong["hour"].apply(classify_hour)
-
+df_dur = route_durations()
+df_agency = routes_per_agency()
+df_start = fetch_starting_stops() 
+kpi = fetch_kpi()
 
 # ---------- KPI ----------
-kpi = fetch_kpi()
-df_agency = routes_per_agency()
-top_agency, top_percent = market_share_calc(df_agency)
 
 c1, c2, c3, c4, c5,c6 = st.columns(6)
+
 c1.metric("Agency", kpi["agency"])
 c2.metric("Routes", kpi["routes"])
 c3.metric("Stops", kpi["stops"])
 c4.metric("Trips", kpi["trips"])
-c5.metric("Peak Congestion", df_cong["congestion_index"].max().round(1))
-c6.metric("📊 Market Leader", top_agency, f"{top_percent:.1f}% share")
+c5.metric("Peak Congestion", round(df_cong["congestion_index"].max(), 1))
+c6.metric("📊 Market Leader", df_agency.iloc[0]["agency_name"], f"{df_agency.iloc[0]['percentage']}%")
 
 # ================= DATA =================
 df_dur = route_durations()
 
 # ================= LONGEST vs SHORTEST =================
-st.markdown("### ⚖️ Longest vs Shortest Route")
+st.markdown("## ⚖️ Longest vs Shortest Route")
 
 longest = df_dur.loc[df_dur["duration"].idxmax()]
 shortest = df_dur.loc[df_dur["duration"].idxmin()]
@@ -211,6 +250,7 @@ with col1:
         mode="lines+markers",
         name="Avg Speed"
     )
+    fig.update_layout(font=dict(family="Inter", size=14))
 
     st.plotly_chart(fig, use_container_width=True)
 # -------- 1. TIME BLOCK BAR --------
@@ -228,14 +268,12 @@ with col2:
         text="congestion_index"
     )
 
+    fig1.update_layout(font=dict(family="Inter", size=14))
     fig1.update_traces(texttemplate='%{text:.1f}', textposition='outside')
 
     st.plotly_chart(fig1, use_container_width=True)
 
-
 st.markdown("## GTFS Analysis")
-
-
 # ================= TOP 5 =================
 top5 = df_dur.sort_values("duration", ascending=False).head(5)
 
@@ -244,9 +282,10 @@ if "selected_route_id" not in st.session_state:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# ================= PIE + DETAILS =================
-col1, col2 = st.columns([0.8, 1.2])
+# ================= 4 COLUMNS =================
+col1, col2, col3, col4 = st.columns([1.2, 0.8, 1.2, 1.2])
 
+# ================= COL 1: PIE =================
 with col1:
     st.markdown("### 🏆 Top 5 Longest Routes")
 
@@ -258,12 +297,14 @@ with col1:
         hole=0
     )
 
-    fig_pie.update_layout(height=350, margin=dict(t=30, b=10, l=10, r=10))
+    fig_pie.update_layout(height=400, margin=dict(t=30, b=10, l=20, r=20))
 
     fig_pie.update_traces(
         textinfo='percent+label',
         pull=[0.2 if r == st.session_state.selected_route_id else 0 for r in top5["route_id"]]
     )
+    
+    fig_pie.update_layout(font=dict(family="Inter", size=14))
 
     selected_points = plotly_events(fig_pie, click_event=True, key="pie_click")
 
@@ -271,63 +312,96 @@ with col1:
         idx = selected_points[0]["pointNumber"]
         st.session_state.selected_route_id = top5.iloc[idx]["route_id"]
 
+# ================= COL 2: ROUTE DETAILS =================
 with col2:
     st.markdown("### 🚏 Route Details")
 
     selected_route_id = st.session_state.selected_route_id
     sel = df_dur[df_dur["route_id"] == selected_route_id].iloc[0]
 
-    left, right = st.columns([1, 1.4])
+    st.markdown(f"""
+    **Route ID:** {sel['route_id']}  
+    **Duration:** {sel['duration']:.1f} min
+    """)
 
-    with left:
-        st.markdown(f"""
-        **Route ID:** {sel['route_id']}  
-        **Duration:** {sel['duration']:.1f} min
-        """)
+    m_preview = folium.Map(location=[27.7, 85.3], zoom_start=12)
 
-        m_preview = folium.Map(location=[27.7, 85.3], zoom_start=12)
-
-        geom = route_geom(selected_route_id)
-        for _, row in geom.iterrows():
-            if row["path"]:
-                folium.PolyLine(
-                    locations=[(lat, lon) for lon, lat in row["path"]],
-                    color="blue",
-                    weight=4
-                ).add_to(m_preview)
-
-        stops_df = stops(selected_route_id)
-        for _, r in stops_df.iterrows():
-            folium.CircleMarker(
-                [r["stop_lat"], r["stop_lon"]],
-                radius=3,
-                color="red",
-                fill=True
+    geom = route_geom(selected_route_id)
+    for _, row in geom.iterrows():
+        if row["path"]:
+            folium.PolyLine(
+                locations=[(lat, lon) for lon, lat in row["path"]],
+                color="blue",
+                weight=4
             ).add_to(m_preview)
 
-        st_folium(m_preview, width=350, height=290)
+    stops_df = stops(selected_route_id)
+    for _, r in stops_df.iterrows():
+        folium.CircleMarker(
+            [r["stop_lat"], r["stop_lon"]],
+            radius=3,
+            color="red",
+            fill=True
+        ).add_to(m_preview)
 
-    with right:
-        st.markdown("#### 📊 Routes by Agency")
+    st_folium(m_preview, width=350, height=340)
 
-        df_agency = routes_per_agency()
+# ================= COL 3: AGENCY BAR =================
+with col3:
+    st.markdown("### 📊 Routes by Agency")
 
-        fig_small = px.bar(
-            df_agency,
-            x="route_count",
-            y="agency_name",
-            orientation="h",
-            color="route_count",
-            color_continuous_scale="turbo"
-        )
+    df_agency = routes_per_agency()
 
-        fig_small.update_layout(height=300, margin=dict(l=5, r=5, t=20, b=5))
-        st.plotly_chart(fig_small, use_container_width=True)
+    fig_small = px.bar(
+        df_agency,
+        x="route_count",
+        y="agency_name",
+        orientation="h",
+        color="route_count",
+        color_continuous_scale="turbo"
+    )
+    
+    fig_small.update_layout(font=dict(family="Inter", size=14))
 
-# ================= FILTER =================
+    fig_small.update_layout(height=400, margin=dict(l=5, r=5, t=20, b=5))
+    st.plotly_chart(fig_small, use_container_width=True)
+
+# ================= COL 4: STARTING STOPS =================
+with col4:
+    st.markdown("### 🚌 Major Starting Stops of Routes")
+
+    top_start = df_start.copy()
+
+    # keep only top 5 by frequency
+    top_start = top_start.sort_values("trips_starting_at_stop", ascending=False).head(5)
+
+    fig_start = px.line(
+        top_start,
+        x="stop_name",
+        y="trips_starting_at_stop",
+        markers=True,
+        text="trips_starting_at_stop"
+    )
+
+    fig_start.update_traces(
+        line=dict(color="#e9f420", width=6),
+        marker=dict(size=10),
+        textposition="top center"
+    )
+
+    fig_start.update_layout(
+        height=400,
+        xaxis_title="Starting Stops",
+        yaxis_title="Count",
+        xaxis_tickangle=-45
+    )
+
+    fig_start.update_layout(font=dict(family="Inter", size=14))
+    st.plotly_chart(fig_start, use_container_width=True)
+
 # ================= FILTER =================
 st.markdown("## 🧭 Dashboard Control Panel")
-col_filter, col_map1, col_map2 = st.columns([1, 1.5, 1])
+col_filter, col_map1 = st.columns([1,3])
 
 with col_filter:
     st.markdown("### 🏢 Agencies & Routes")
@@ -339,7 +413,7 @@ with col_filter:
     selected_agencies = []
 
     # Use a container to keep the list scrollable if it gets too long
-    with st.container(height=600): 
+    with st.container(height=800): 
         for _, agency_row in agencies.iterrows():
             agency_id = agency_row["agency_id"]
             agency_name = agency_row["agency_name"]
@@ -373,31 +447,44 @@ with col_map1:
     st.markdown("### 🗺️ Route Map")
 
     if route_id:
-        m1 = folium.Map(location=[27.7, 85.3], zoom_start=12)
+        # IMPORTANT: no default tiles
+        m1 = folium.Map(location=[27.7, 85.3], zoom_start=13, tiles=None)
 
+        # ================= TILE LAYERS =================
+        folium.TileLayer(tiles="OpenStreetMap",name="Openstreet", show=True).add_to(m1)
+        folium.TileLayer( "CartoDB positron",name="Light", show=False).add_to(m1)
+        folium.TileLayer("CartoDB dark_matter",name="Dark", show=False).add_to(m1)
+        folium.TileLayer(tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        name="Satellite",attr="Esri", show=False).add_to(m1)
+
+        # ================= ROUTE LAYER =================
         geom = route_geom(route_id)
+        route_layer = folium.FeatureGroup(name="Route", show=True)
 
         for _, row in geom.iterrows():
             if row["path"]:
                 coords = [(lat, lon) for lon, lat in row["path"]]
 
-                # faint base line
                 folium.PolyLine(
                     coords,
                     color="gray",
                     weight=2,
                     opacity=0.3
-                ).add_to(m1)
+                ).add_to(route_layer)
 
-                # 🔥 ANIMATED FLOW
                 AntPath(
                     locations=coords,
                     color="blue",
                     weight=4,
                     delay=800
-                ).add_to(m1)
+                ).add_to(route_layer)
 
+        route_layer.add_to(m1)
+
+        # ================= STOPS LAYER =================
         stops_df = stops(route_id)
+
+        stops_layer = folium.FeatureGroup(name="Stops", show=True)
 
         for _, r in stops_df.iterrows():
             folium.CircleMarker(
@@ -405,27 +492,43 @@ with col_map1:
                 radius=3,
                 color="red",
                 fill=True
-            ).add_to(m1)
+            ).add_to(stops_layer)
 
-        heat = [[r["stop_lat"], r["stop_lon"]] for _, r in stops_df.iterrows()]
-        if heat:
-            HeatMap(heat, radius=8).add_to(m1)
+        stops_layer.add_to(m1)
 
-        st_folium(m1, width=800, height=650)
+        # ================= STOPS HEATMAP (FIXED) =================
+        stops_heat = [
+            [r["stop_lat"], r["stop_lon"]]
+            for _, r in stops_df.iterrows()
+        ]
+
+        stops_heat_layer = folium.FeatureGroup(name="Stops Heatmap", show=True)
+
+        if len(stops_heat) > 0:
+            HeatMap(stops_heat, radius=8).add_to(stops_heat_layer)
+
+        stops_heat_layer.add_to(m1)
+
+        # ================= HUBS =================
+        hubs_df = hubs()
+
+        hub_heat = [
+            [r["osm_latitude"], r["osm_longitude"]]
+            for _, r in hubs_df.iterrows()
+        ]
+
+        hub_layer = folium.FeatureGroup(name="Hubs", show=True)
+
+        if len(hub_heat) > 0:
+            HeatMap(hub_heat, radius=8).add_to(hub_layer)
+
+        hub_layer.add_to(m1)
+
+        # ================= LAYER CONTROL =================
+        folium.LayerControl(collapsed=True).add_to(m1)
+
+        # ================= RENDER =================
+        st_folium(m1, use_container_width=True, height=800)
 
     else:
         st.info("👈 Select an agency and route")
-# ================= HUB MAP =================
-with col_map2:
-    st.markdown("### 🔥 Hub Heatmap")
-
-    m2 = folium.Map(location=[27.7,85.3], zoom_start=12)
-    hubs_df = hubs()
-
-    heat = [[r["osm_latitude"], r["osm_longitude"]] for _, r in hubs_df.iterrows()]
-
-    if heat:
-        HeatMap(heat).add_to(m2)
-
-    # Increased width from 500 to 700 to match your map size
-    st_folium(m2, width=700, height=500)
