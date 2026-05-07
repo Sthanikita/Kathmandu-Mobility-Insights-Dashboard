@@ -183,18 +183,17 @@ def hubs():
 @st.cache_data
 def route_durations():
     return pd.read_sql("""
-        SELECT 
-            t.route_id,
-            (
-                EXTRACT(EPOCH FROM MAX(st.arrival_time)::time) -
-                EXTRACT(EPOCH FROM MIN(st.departure_time)::time)
-            ) / 60 AS duration
-        FROM trips t
-        JOIN stop_times st ON t.trip_id = st.trip_id
-        GROUP BY t.route_id
-        HAVING 
-            MIN(st.departure_time) IS NOT NULL 
-            AND MAX(st.arrival_time) IS NOT NULL
+           SELECT 
+    t.route_id,
+    t.trip_id,
+    (
+        EXTRACT(EPOCH FROM MAX(st.arrival_time)::time) -
+        EXTRACT(EPOCH FROM MIN(st.departure_time)::time)
+    ) / 60 AS duration
+FROM trips t
+JOIN stop_times st ON t.trip_id = st.trip_id
+GROUP BY t.route_id, t.trip_id
+ORDER BY duration DESC;
     """, get_engine())
 
 # ================= APP =================
