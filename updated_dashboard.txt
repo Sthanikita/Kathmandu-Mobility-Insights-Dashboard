@@ -152,8 +152,8 @@ div[data-testid="stExpander"] li {
 
 .hero-img {
     width: 100vw;
-    height: 600px;
-    object-fit: contain;
+    height: 300px;
+    object-fit: cover;
     display: block;
 
     border-bottom-left-radius: 20px;
@@ -745,7 +745,6 @@ with col_map2:
         top_start = (
             df_start.sort_values("trips_starting_at_stop",ascending=False)
             .head(5)
-
         )
 
         fig_start = px.line(
@@ -755,15 +754,9 @@ with col_map2:
             markers=True,
             text="trips_starting_at_stop"
         )
-        fig_start.update_layout(
-        height=300,
-        xaxis_title="Starting Stops",
-        yaxis_title="Count",
-        xaxis_tickangle=-45
-    )
-        
-        fig_start.update_layout(font=dict(family="Inter", size=14))
-        st.plotly_chart(fig_start,use_container_width=True)
+
+        st.plotly_chart(fig_start,use_container_width=True
+        )
 
 # ================= CONGESTION VISUALS ================
 left_container, right_container = st.columns([3,1])
