@@ -6,235 +6,39 @@ from folium.plugins import HeatMap,AntPath
 import pandas as pd
 import sqlalchemy
 import plotly.express as px
-import plotly.io as pio
-st.set_page_config(layout="wide")
-pio.templates.default = "plotly_dark"
+
 # ================= STYLE FIX =================
 st.markdown("""
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
-
-/* =========================================================
-   GLOBAL
-========================================================= */
-html, body, [class*="css"] {
+html, body, [class*="css"]  {
+    font-family: 'Inter', sans-serif;
+}
+.leaflet-control-layers {
     font-family: 'Inter', sans-serif !important;
-    background-color: #000000 !important;
-    color: white !important;
 }
-
-/* MAIN APP */
-.stApp {
-    background-color: #000000 !important;
-}
-
-/* REMOVE DEFAULT STREAMLIT WIDTH */
 .block-container {
-    max-width: 100% !important;
-    padding-top: 0.7rem !important;
-    padding-left: 1.2rem !important;
-    padding-right: 1.2rem !important;
-    padding-bottom: 1rem !important;
+    padding-top: 1rem;
 }
-
-/* =========================================================
-   SIDEBAR
-========================================================= */
-section[data-testid="stSidebar"] {
-    background-color: #050505 !important;
-    border-right: 1px solid rgba(255,255,255,0.05);
-}
-
-/* =========================================================
-   CHECKBOX
-========================================================= */
-div[data-testid="stCheckbox"] label {
-    font-size: 14px !important;
-    font-weight: 500 !important;
-    color: #e5e5e5 !important;
-}
-
-/* =========================================================
-   KPI CARDS
-========================================================= */
-div[data-testid="stMetric"] {
-    background: linear-gradient(
-        145deg,
-        rgba(255,255,255,0.04),
-        rgba(255,255,255,0.02)
-    ) !important;
-
-    border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 18px;
-    padding: 18px 18px 14px 18px;
-
-    backdrop-filter: blur(6px);
-
-    transition: 0.3s ease;
-}
-
-/* HOVER EFFECT */
-div[data-testid="stMetric"]:hover {
-    transform: translateY(-2px);
-    border: 1px solid rgba(255,255,255,0.12);
-}
-
-/* KPI LABEL */
-div[data-testid="stMetricLabel"] {
-    font-size: 15px !important;
-    font-weight: 600 !important;
-    color: #bdbdbd !important;
-    margin-bottom: 10px !important;
-    line-height: 1.3 !important;
-}
-
-/* KPI VALUE */
-div[data-testid="stMetricValue"] {
-    font-size: 22px !important;
-    font-weight: 700 !important;
-    color: white !important;
-    line-height: 1 !important;
-}
-
-/* KPI DELTA */
-div[data-testid="stMetricDelta"] {
-    font-size: 14px !important;
-    font-weight: 500 !important;
-}
-
-/* =========================================================
-   EXPANDERS
-========================================================= */
-div[data-testid="stExpander"] {
-    background-color: #0d0d0d !important;
-    border: 1px solid rgba(255,255,255,0.05);
-    border-radius: 16px !important;
-    overflow: hidden;
-}
-
-/* DEFAULT SMALL EXPANDERS */
-div[data-testid="stExpander"] details summary p {
-    font-size: 14px !important;
-    font-weight: 600 !important;
-    color: white !important;
-    margin: 0 !important;
-}
-
-/* HEADER PADDING */
-div[data-testid="stExpander"] details summary {
-    padding: 0.6rem 0.8rem !important;
-}
-
-/* MAIN BIG HEADERS ONLY */
-.main-header details summary p {
-    font-size: 18px !important;
-    font-weight: 700 !important;
-}
-
-/* CONTENT TEXT */
-div[data-testid="stExpander"] p,
-div[data-testid="stExpander"] li {
-    font-size: 14px !important;
-    font-weight: 500 !important;
-    line-height: 1.7 !important;
-    color: #d0d0d0 !important;
-}
-
-/* =========================================================
-   HERO IMAGE
-========================================================= */
-.hero-wrapper {
-    width: 100vw;
-    margin-left: calc(-50vw + 50%);
-    overflow: hidden;
-}
-
-.hero-img {
-    width: 100vw;
-    height: 600px;
-    object-fit: contain;
-    display: block;
-
-    border-bottom-left-radius: 20px;
-    border-bottom-right-radius: 20px;
-}
-
-/* =========================================================
-   PLOTLY
-========================================================= */
-.js-plotly-plot,
-.plotly,
-.plot-container {
+            /* Plotly */
+.js-plotly-plot, .plotly, .plot-container {
     font-family: 'Inter', sans-serif !important;
-    background-color: transparent !important;
 }
 
-/* =========================================================
-   LEAFLET MAP
-========================================================= */
-.leaflet-container {
-    background-color: #000000 !important;
-    border-radius: 14px !important;
-}
-
-/* POPUPS */
-.leaflet-popup-content {
-    font-family: 'Inter', sans-serif !important;
-    font-size: 13px !important;
-}
-
-/* LAYER CONTROL */
+/* Leaflet */
+.leaflet-container,
+.leaflet-popup-content,
 .leaflet-control {
     font-family: 'Inter', sans-serif !important;
 }
+</style>
+""", unsafe_allow_html=True)
 
-/* =========================================================
-   SCROLLBAR
-========================================================= */
-::-webkit-scrollbar {
-    width: 10px;
+st.markdown("""
+<style>
+.leaflet-control-layers {
+    z-index: 9999 !important;
 }
-
-::-webkit-scrollbar-track {
-    background: #050505;
-}
-
-::-webkit-scrollbar-thumb {
-    background: #2b2b2b;
-    border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: #3d3d3d;
-}
-
-/* =========================================================
-   BUTTONS
-========================================================= */
-.stButton > button {
-    border-radius: 12px !important;
-    border: 1px solid rgba(255,255,255,0.08) !important;
-
-    background-color: #111111 !important;
-    color: white !important;
-
-    transition: 0.25s ease;
-}
-
-.stButton > button:hover {
-    background-color: #1c1c1c !important;
-    border-color: rgba(255,255,255,0.15) !important;
-}
-
-/* =========================================================
-   DATAFRAME
-========================================================= */
-[data-testid="stDataFrame"] {
-    border-radius: 12px !important;
-    overflow: hidden;
-}
-
 </style>
 """, unsafe_allow_html=True)
 # ================= DB =================
@@ -260,7 +64,9 @@ def fetch_congestion():
     return pd.read_sql("""
         SELECT 
             EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) AS hour,
+
             COUNT(*) AS gps_points,
+
             COUNT(DISTINCT "Location") AS active_vehicles,
 
             AVG(
@@ -280,7 +86,9 @@ def fetch_congestion():
             END AS time_block
 
         FROM clustered_gps_points
+
         GROUP BY hour
+
         ORDER BY hour
     """, engine)
 
@@ -370,45 +178,12 @@ def hubs():
         )
     except:
         return pd.DataFrame(columns=["osm_latitude", "osm_longitude"])
-    
-    # ================= COMMON STOPS =================
-@st.cache_data
-def common_stops(route_ids):
-
-    if len(route_ids) < 2:
-        return pd.DataFrame()
-
-    engine = get_engine()
-
-    route_list = ",".join([f"'{r}'" for r in route_ids])
-
-    query = f"""
-        SELECT
-            s.stop_id,
-            s.stop_name,
-            s.stop_lat,
-            s.stop_lon,
-            COUNT(DISTINCT t.route_id) AS route_count
-        FROM stops s
-        JOIN stop_times st
-            ON s.stop_id = st.stop_id
-        JOIN trips t
-            ON st.trip_id = t.trip_id
-        WHERE t.route_id IN ({route_list})
-        GROUP BY
-            s.stop_id,
-            s.stop_name,
-            s.stop_lat,
-            s.stop_lon
-        HAVING COUNT(DISTINCT t.route_id) = {len(route_ids)}
-    """
-    return pd.read_sql(query, engine)
 
 # ================= ROUTE DURATION =================
 @st.cache_data
 def route_durations():
     return pd.read_sql("""
-        SELECT 
+           SELECT 
     t.route_id,
     t.trip_id,
     (
@@ -422,23 +197,8 @@ ORDER BY duration DESC;
     """, get_engine())
 
 # ================= APP =================
-import base64
-
-def img_to_base64(path):
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
-
-img = img_to_base64("Frame 235.png")
-
-# ================= CONTAINER =================
-with st.container(border=True):
-
-    st.markdown(f"""
-    <div class="hero-wrapper">
-        <img src="data:image/png;base64,{img}" class="hero-img">
-    </div>
-    """, unsafe_allow_html=True)
-
+st.set_page_config(layout="wide")
+st.title("🚌 Kathmandu Valley Mobility Insights Dashboard")
 
 # ================= LOAD DATA =================
 df_cong = fetch_congestion()
@@ -447,526 +207,328 @@ df_agency = routes_per_agency()
 df_start = fetch_starting_stops() 
 kpi = fetch_kpi()
 
-longest = df_dur.loc[df_dur["duration"].idxmax()]
-shortest = df_dur.loc[df_dur["duration"].idxmin()]
-
 # ---------- KPI ----------
-st.set_page_config(layout="wide")
-with st.container(border=True):
-    c1, c2, c3, c4, c5, c6 = st.columns([1.2,1.2,1.2,2,2,2])
+
+c1, c2, c3, c4, c5,c6 = st.columns(6)
 
 c1.metric("Agency", kpi["agency"])
 c2.metric("Routes", kpi["routes"])
-# c3.metric("Stops", kpi["stops"])
-# c4.metric("Trips", kpi["trips"])
-c3.metric("Peak Congestion", round(df_cong["congestion_index"].max(), 1))
-c4.metric("📊Market Leader", df_agency.iloc[0]["agency_name"], f"{df_agency.iloc[0]['percentage']}%")
-c5.metric(
-        "Longest Route",
-        longest["route_id"],
-        f"{longest['duration']:.1f} min"
+c3.metric("Stops", kpi["stops"])
+c4.metric("Trips", kpi["trips"])
+c5.metric("Peak Congestion", round(df_cong["congestion_index"].max(), 1))
+c6.metric("📊 Market Leader", df_agency.iloc[0]["agency_name"], f"{df_agency.iloc[0]['percentage']}%")
+
+# ================= DATA =================
+df_dur = route_durations()
+
+# ================= LONGEST vs SHORTEST =================
+st.markdown("## ⚖️ Longest vs Shortest Route")
+
+longest = df_dur.loc[df_dur["duration"].idxmax()]
+shortest = df_dur.loc[df_dur["duration"].idxmin()]
+
+colA, colB = st.columns(2)
+colA.metric("🚀 Longest Route", longest["route_id"], f"{longest['duration']:.1f} min")
+colB.metric("⚡ Shortest Route", shortest["route_id"], f"{shortest['duration']:.1f} min")
+
+# ================= CONGESTION VISUALS =================
+
+st.markdown("## 🚦 Congestion Intelligence Dashboard")
+
+
+col1, col2 = st.columns(2)
+# -------- TREND --------
+with col1:
+    st.markdown("### 📈 Congestion Trend")
+
+    fig = px.line(df_cong, x="hour", y="congestion_index", markers=True)
+
+    fig.add_scatter(
+        x=df_cong["hour"],
+        y=df_cong["avg_speed"],
+        mode="lines+markers",
+        name="Avg Speed"
+    )
+    fig.update_layout(font=dict(family="Inter", size=14))
+
+    st.plotly_chart(fig, use_container_width=True)
+# -------- 1. TIME BLOCK BAR --------
+
+with col2:
+    st.markdown("### 📊 Congestion by Time Block")
+
+    block = df_cong.groupby("time_block", as_index=False)["congestion_index"].mean()
+
+    fig1 = px.bar(
+        block,
+        x="time_block",
+        y="congestion_index",
+        color="congestion_index",
+        text="congestion_index"
     )
 
-c6.metric(
-        "Shortest Route",
-        shortest["route_id"],
-        f"{shortest['duration']:.1f} min"
+    fig1.update_layout(font=dict(family="Inter", size=14))
+    fig1.update_traces(texttemplate='%{text:.1f}', textposition='outside')
+
+    st.plotly_chart(fig1, use_container_width=True)
+
+st.markdown("## GTFS Analysis")
+# ================= TOP 5 =================
+top5 = df_dur.sort_values("duration", ascending=False).head(5)
+
+if "selected_route_id" not in st.session_state:
+    st.session_state.selected_route_id = top5.iloc[0]["route_id"]
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ================= 4 COLUMNS =================
+col1, col2, col3, col4 = st.columns([1.2, 0.6, 1.2, 1.2])
+
+# ================= COL 1: PIE =================
+with col1:
+    st.markdown("### 🏆 Top 5 Longest Routes")
+
+    fig_pie = px.pie(
+        top5,
+        names="route_id",
+        values="duration",
+        color_discrete_sequence=px.colors.sequential.Turbo,
+        hole=0
     )
-col_filter, col_map1, col_map2 = st.columns([1.5, 3, 1.5])
 
-# =========================================================
-# ROUTE COLORS (GLOBAL COLOR MAP)
-# =========================================================
-route_colors = [
-    "blue","red","green","purple","orange","black","brown","yellow"
-]
+    fig_pie.update_layout(height=400, margin=dict(t=30, b=10, l=20, r=20))
 
-color_emoji_map = {
-    "blue": "🟦",
-    "red": "🟥",
-    "green": "🟩",
-    "purple": "🟪",
-    "orange": "🟧",
-    "black": "⬛",
-    "brown": "🟫",
-    "yellow": "🟨"
+    fig_pie.update_traces(
+        textinfo='percent',
+        pull=[0.2 if r == st.session_state.selected_route_id else 0 for r in top5["route_id"]]
+    )
     
-}
+    fig_pie.update_layout(font=dict(family="Inter", size=14))
 
-# ALL ROUTES
-all_routes_df = fetch_routes()
+    selected_points = plotly_events(fig_pie, click_event=True, key="pie_click")
 
-# FIXED COLOR MAP
-route_color_map = {
-    route_id: route_colors[i % len(route_colors)]
-    for i, route_id in enumerate(all_routes_df["route_id"])
-}
+    if selected_points:
+        idx = selected_points[0]["pointNumber"]
+        st.session_state.selected_route_id = top5.iloc[idx]["route_id"]
 
-# =========================================================
-# FILTER PANEL CONTAINER
-# =========================================================
-with col_filter:
+# ================= COL 2: ROUTE DETAILS =================
+with col2:
+    st.markdown("### 🚏 Route Details")
 
-    with st.container(border=True):
-        st.markdown('<div class="main-header">', unsafe_allow_html=True)
-        with st.expander("🚌 Agencies & Routes", expanded=True):
+    selected_route_id = st.session_state.selected_route_id
+    sel = df_dur[df_dur["route_id"] == selected_route_id].iloc[0]
 
-            agencies = fetch_agencies()
-            routes_df = fetch_routes()
+    st.markdown(f"""
+    **Route ID:** {sel['route_id']}  
+    **Duration:** {sel['duration']:.1f} min
+    """)
 
-            selected_routes = []
-            selected_agencies = []
+    m_preview = folium.Map(location=[27.7, 85.3], zoom_start=12)
 
-            with st.container(height=650):
+    geom = route_geom(selected_route_id)
+    for _, row in geom.iterrows():
+        if row["path"]:
+            folium.PolyLine(
+                locations=[(lat, lon) for lon, lat in row["path"]],
+                color="blue",
+                weight=4
+            ).add_to(m_preview)
 
-                for _, agency_row in agencies.iterrows():
+    stops_df = stops(selected_route_id)
+    for _, r in stops_df.iterrows():
+        folium.CircleMarker(
+            [r["stop_lat"], r["stop_lon"]],
+            radius=3,
+            color="red",
+            fill=True
+        ).add_to(m_preview)
 
-                    agency_id = agency_row["agency_id"]
-                    agency_name = agency_row["agency_name"]
+    st_folium(m_preview, width=350, height=340)
 
-                    with st.expander(f"{agency_name}", expanded=False):
+# ================= COL 3: AGENCY BAR =================
+with col3:
+    st.markdown("### 📊 Routes by Agency")
 
-                        agency_routes = routes_df[
-                            routes_df["agency_id"] == agency_id
-                        ]
+    df_agency = routes_per_agency()
 
-                        for _, route_row in agency_routes.iterrows():
+    fig_small = px.bar(
+        df_agency,
+        x="route_count",
+        y="agency_name",
+        orientation="h",
+        color="route_count",
+        color_continuous_scale="turbo"
+    )
+    
+    fig_small.update_layout(font=dict(family="Inter", size=14))
 
-                            route_id = route_row["route_id"]
-                            route_name = route_row["route_short_name"]
+    fig_small.update_layout(height=400, margin=dict(l=5, r=5, t=20, b=5))
+    st.plotly_chart(fig_small, use_container_width=True)
 
-                            # COLOR
-                            route_color = route_color_map[route_id]
-                            color_icon = color_emoji_map.get(route_color, "🔴")
+# ================= COL 4: STARTING STOPS =================
+with col4:
+    st.markdown("### 🚌 Major Starting Stops of Routes")
 
-                            route_checked = st.checkbox(
-                                f"{color_icon} {route_name}",
-                                key=f"route_{route_id}"
-                            )
+    top_start = df_start.copy()
 
-                            if route_checked:
-                                if route_id not in selected_routes:
-                                    selected_routes.append(route_id)
+    # keep only top 5 by frequency
+    top_start = top_start.sort_values("trips_starting_at_stop", ascending=False).head(5)
 
-                                if agency_id not in selected_agencies:
-                                    selected_agencies.append(agency_id)
+    fig_start = px.line(
+        top_start,
+        x="stop_name",
+        y="trips_starting_at_stop",
+        markers=True,
+        text="trips_starting_at_stop"
+    )
 
-# =========================================================
-# MAP CONTAINER
-# =========================================================
-with col_map1:
-    with st.container(border=True):
-        with st.expander("🗺️ Route Map", expanded=True):
+    fig_start.update_traces(
+        line=dict(color="RED", width=6),
+        marker=dict(size=10),
+        textposition="top center"
+    )
 
-            # ================= CHECK ROUTES =================
-            if not selected_routes:
-
-                st.info("👈 Select an agency and route")
-
-            else:
-
-                # ================= INTERSECTION DATA =================
-                intersection_df = pd.DataFrame()
-
-                if len(selected_routes) >= 2:
-                    intersection_df = common_stops(selected_routes)
-
-                # ================= BASE MAP =================
-                m1 = folium.Map(location=[27.7, 85.3],zoom_start=12,tiles=None
-                )
-
-                folium.TileLayer("OpenStreetMap",name="Openstreet",show=True
-                ).add_to(m1)
-
-                folium.TileLayer("CartoDB positron",name="Light",show=False
-                ).add_to(m1)
-
-                folium.TileLayer("CartoDB dark_matter",name="Dark",show=False
-                ).add_to(m1)
-
-                # ================= ROUTES =================
-                for route_id in selected_routes:
-
-                    color = route_color_map[route_id]
-                    geom = route_geom(route_id)
-
-                    route_layer = folium.FeatureGroup(
-                        name=f"Route {route_id}",
-                        show=True
-                    )
-
-                    for _, row in geom.iterrows():
-                        if row["path"]:
-                            coords = [
-                                (lat, lon)
-                                for lon, lat in row["path"]
-                            ]
-
-                            folium.PolyLine(coords,color="gray",weight=2,opacity=0.3
-                            ).add_to(route_layer)
-
-                            AntPath(locations=coords,color=color,weight=4,delay=800   
-                            ).add_to(route_layer)
-
-                    route_layer.add_to(m1)
-
-                    # ================= STOPS =================
-                    stops_df = stops(route_id)
-
-                    stops_layer = folium.FeatureGroup(
-                        name=f"Stops {route_id}",
-                        show=False
-                    )
-
-                    for _, r in stops_df.iterrows():
-
-                        folium.CircleMarker(
-                            location=[r["stop_lat"], r["stop_lon"]],
-                            radius=3,
-                            color=color,
-                            fill=True,
-                            fill_opacity=1
-                        ).add_to(stops_layer)
-
-                    stops_layer.add_to(m1)
-
-                    # ================= STOPS HEATMAP =================
-                    stops_heat = [
-                        [r["stop_lat"], r["stop_lon"]]
-                        for _, r in stops_df.iterrows()
-                    ]
-
-                    stops_heat_layer = folium.FeatureGroup(
-                        name="Stops Heatmap",
-                        show=False
-                    )
-
-                    if len(stops_heat) > 0:
-                        HeatMap(
-                            stops_heat,
-                            radius=8
-                        ).add_to(stops_heat_layer)
-
-                    stops_heat_layer.add_to(m1)
-
-                # ================= HUBS =================
-                hubs_df = hubs()
-
-                hub_heat = [
-                    [r["osm_latitude"], r["osm_longitude"]]
-                    for _, r in hubs_df.iterrows()
-                ]
-
-                hub_layer = folium.FeatureGroup(
-                    name="Hubs",
-                    show=True
-                )
-
-                if len(hub_heat) > 0:
-
-                    HeatMap(
-                        hub_heat,
-                        radius=15,
-                        blur=20,
-                        min_opacity=0.4,
-                        max_zoom=10
-                    ).add_to(hub_layer)
-
-                hub_layer.add_to(m1)
-
-                # ================= INTERSECTION STOPS =================
-                if not intersection_df.empty:
-
-                    intersection_layer = folium.FeatureGroup(
-                        name="🔄 Interchange Stops",
-                        show=True
-                    )
-
-                    for _, r in intersection_df.iterrows():
-
-                        folium.CircleMarker(
-                            location=[r["stop_lat"], r["stop_lon"]],
-                            radius=9,
-                            color="red",
-                            fill=True,
-                            fill_color="red",
-                            fill_opacity=0.95,
-                            popup=folium.Popup(
-                                f"""
-                                <b>🔄 Interchange Stop</b><br>
-                                {r['stop_name']}<br>
-                                Routes Passing: {r['route_count']}
-                                """,
-                                max_width=250
-                            )
-                        ).add_to(intersection_layer)
-
-                    intersection_layer.add_to(m1)
-
-                # ================= LAYER CONTROL =================
-                folium.LayerControl(collapsed=True).add_to(m1)
-
-                # ================= RENDER MAP =================
-                st_folium(
-                    m1,
-                    use_container_width=True,
-                    height=650
-                )
-# =========================================================
-# CHART CONTAINER
-# =========================================================
-with col_map2:
-
-    with st.container(border=True):
-
-        st.expander("📊 Routes by Agency")
-        df_agency = routes_per_agency()
-        fig_small = px.bar(
-            df_agency,
-            x="route_count",
-            y="agency_name",
-            orientation="h",
-            color="route_count",
-            color_continuous_scale="turbo"
-        )
-
-        fig_small.update_layout(
-            height=300,
-            margin=dict(l=5, r=5, t=20, b=5)
-        )
-
-        st.plotly_chart(
-            fig_small,
-            use_container_width=True
-        )
-
-        # Major Starting Stops
-        st.expander(" 🚌 Major Starting Stops")
-        top_start = (
-            df_start.sort_values("trips_starting_at_stop",ascending=False)
-            .head(5)
-
-        )
-
-        fig_start = px.line(
-            top_start,
-            x="stop_name",
-            y="trips_starting_at_stop",
-            markers=True,
-            text="trips_starting_at_stop"
-        )
-        fig_start.update_layout(
-        height=300,
+    fig_start.update_layout(
+        height=400,
         xaxis_title="Starting Stops",
         yaxis_title="Count",
         xaxis_tickangle=-45
     )
-        
-        fig_start.update_layout(font=dict(family="Inter", size=14))
-        st.plotly_chart(fig_start,use_container_width=True)
 
-# ================= CONGESTION VISUALS ================
-left_container, right_container = st.columns([3,1])
+    fig_start.update_layout(font=dict(family="Inter", size=14))
+    st.plotly_chart(fig_start, use_container_width=True)
 
-# =========================================================
-# LEFT CONTAINER -> COL1 + COL2
-# =========================================================
-with left_container:
+# ================= FILTER =================
+st.markdown("## 🧭 Dashboard Control Panel")
+col_filter, col_map1 = st.columns([1,3])
 
-    with st.container(border=True):
+with col_filter:
+    st.markdown("### 🏢 Agencies & Routes")
 
-        col3, col4 = st.columns([1.2, 1.6])
+    agencies = fetch_agencies()
+    routes_df = fetch_routes()
 
-        # ================= TOP 5 =================
-        top5 = (
-            df_dur
-            .sort_values("duration", ascending=False)
-            .head(5)
-        )
+    selected_routes = []
+    selected_agencies = []
 
-        if "selected_route_id" not in st.session_state:
-            st.session_state.selected_route_id = top5.iloc[0]["route_id"]
+    # Use a container to keep the list scrollable if it gets too long
+    with st.container(height=800): 
+        for _, agency_row in agencies.iterrows():
+            agency_id = agency_row["agency_id"]
+            agency_name = agency_row["agency_name"]
 
-        # -------------------------------------------------
-        # COL 3 -> PIE
-        # -------------------------------------------------
-        with col3:
-            with st.expander("Top 5 Longest Routes"):
-                st.write("""
-    This visualization shows the 5 routes with the highest trip duration.
-    It helps analyze:
-    - Long distance routes
-    - Slow-moving transit lines
-    - Operational efficiency issues
-    """)
-                
-            fig_pie = px.pie(
-                top5,
-                names="route_id",
-                values="duration",
-                color_discrete_sequence=px.colors.sequential.Turbo,
-                hole=0
-            )
+            # Using an expander to group routes cleanly without extra white space
+            with st.expander(f"🏢 {agency_name}", expanded=False):
+                agency_routes = routes_df[routes_df["agency_id"] == agency_id]
 
-            fig_pie.update_layout(
-                height=450,
-                margin=dict(t=30, b=10, l=20, r=20),
-                font=dict(family="Inter", size=14)
-            )
+                for _, route_row in agency_routes.iterrows():
+                    # Individual checkbox for each route
+                    route_checked = st.checkbox(
+                        f"🛣️ {route_row['route_short_name']}",
+                        key=f"route_{route_row['route_id']}"
+                    )
 
-            fig_pie.update_traces(
-                textinfo='percent',
-                pull=[
-                    0.2 if r == st.session_state.selected_route_id else 0
-                    for r in top5["route_id"]
-                ]
-            )
+                    if route_checked:
+                        selected_routes.append(route_row["route_id"])
+                        if agency_id not in selected_agencies:
+                            selected_agencies.append(agency_id)
 
-            selected_points = plotly_events(
-                fig_pie,
-                click_event=True,
-                key="pie_click"
-            )
+# ================= ROUTE =================
+if selected_routes:
+    route_id = selected_routes[0]
+elif selected_agencies:
+    route_id = routes_df[routes_df["agency_id"] == selected_agencies[0]].iloc[0]["route_id"]
+else:
+    route_id = None
 
-            if selected_points:
+# ================= MAIN MAP (WITH ANIMATION) =================
+with col_map1:
+    st.markdown("### 🗺️ Route Map")
 
-                idx = selected_points[0]["pointNumber"]
+    if route_id:
+        # IMPORTANT: no default tiles
+        m1 = folium.Map(location=[27.7, 85.3], zoom_start=13, tiles=None)
 
-                st.session_state.selected_route_id = (
-                    top5.iloc[idx]["route_id"]
-                )
+        # ================= TILE LAYERS =================
+        folium.TileLayer(tiles="OpenStreetMap",name="Openstreet", show=True).add_to(m1)
+        folium.TileLayer( "CartoDB positron",name="Light", show=False).add_to(m1)
+        folium.TileLayer("CartoDB dark_matter",name="Dark", show=False).add_to(m1)
+        folium.TileLayer(tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        name="Satellite",attr="Esri", show=False).add_to(m1)
 
-        # -------------------------------------------------
-        # COL 4 -> ROUTE DETAILS
-        # -------------------------------------------------
-        with col4:
-            with st.expander("🚏 Route Details"):
-                st.write("""
-    This visualization shows the route duration and path for the selected route from the pie chart.
-    It helps analyze:
-    - Route length and travel time
-    - Geographical coverage
-    - Potential bottlenecks or inefficiencies
-    """)
+        # ================= ROUTE LAYER =================
+        geom = route_geom(route_id)
+        route_layer = folium.FeatureGroup(name="Route", show=True)
 
-            selected_route_id = st.session_state.selected_route_id
-            sel = df_dur[
-                df_dur["route_id"] == selected_route_id
-            ].iloc[0]
+        for _, row in geom.iterrows():
+            if row["path"]:
+                coords = [(lat, lon) for lon, lat in row["path"]]
 
-            st.markdown(f"""
-            **Route ID:** {sel['route_id']}  
-            **Duration:** {sel['duration']:.1f} min
-            """)
+                folium.PolyLine(
+                    coords,
+                    color="gray",
+                    weight=2,
+                    opacity=0.3
+                ).add_to(route_layer)
 
-            m_preview = folium.Map(
-    location=[27.7, 85.3],
-    zoom_start=12,
-    tiles="CartoDB positron"
-)
-            geom = route_geom(selected_route_id)
+                AntPath(
+                    locations=coords,
+                    color="blue",
+                    weight=4,
+                    delay=800
+                ).add_to(route_layer)
 
-            for _, row in geom.iterrows():
+        route_layer.add_to(m1)
 
-                if row["path"]:
+        # ================= STOPS LAYER =================
+        stops_df = stops(route_id)
 
-                    folium.PolyLine(
-                        locations=[
-                            (lat, lon)
-                            for lon, lat in row["path"]
-                        ],
-                        color="blue",
-                        weight=4
-                    ).add_to(m_preview)
+        stops_layer = folium.FeatureGroup(name="Stops", show=True)
 
-            stops_df = stops(selected_route_id)
+        for _, r in stops_df.iterrows():
+            folium.CircleMarker(
+                [r["stop_lat"], r["stop_lon"]],
+                radius=3,
+                color="red",
+                fill=True
+            ).add_to(stops_layer)
 
-            for _, r in stops_df.iterrows():
+        stops_layer.add_to(m1)
 
-                folium.CircleMarker(
-                    [r["stop_lat"], r["stop_lon"]],
-                    radius=3,
-                    color="red",
-                    fill=True
-                ).add_to(m_preview)
+        # ================= STOPS HEATMAP (FIXED) =================
+        stops_heat = [
+            [r["stop_lat"], r["stop_lon"]]
+            for _, r in stops_df.iterrows()
+        ]
 
-            st_folium(
-    m_preview,
-    use_container_width=True,
-    height=640
-)
-    
-    
-    
-# =========================================================
-# RIGHT COLUMN -> CONGESTION
-# =========================================================
-with right_container:
+        stops_heat_layer = folium.FeatureGroup(name="Stops Heatmap", show=True)
 
-    with st.container(border=True):
+        if len(stops_heat) > 0:
+            HeatMap(stops_heat, radius=8).add_to(stops_heat_layer)
 
-        with st.expander("📈 Congestion Trend"):
-            st.write("""
-This line chart shows congestion index and average speed by hour.
-It helps analyze:
-- Peak congestion hours
-- Correlation between speed and congestion
-                      
-The maximum congestion rate was **62.02**, observed at **10 AM**, while the minimum congestion rate was **18.13**, occurring after **8 PM**. The lowest average speed recorded was **0.00 km/h**, primarily during the early hours of the day between **1 AM and 5 AM**, whereas the highest average speed of **20.19 km/h** was observed during the morning period between **5 AM and 9 AM**. Overall, the congestion index and average speed exhibit an inverse relationship, where congestion levels increase during peak traffic hours while average vehicle speed decreases significantly during the same periods.
-            """)
+        stops_heat_layer.add_to(m1)
 
-        # ================= CONGESTION MAX/MIN =================
-        max_cong = df_cong.loc[df_cong["congestion_index"].idxmax()]
-        min_cong = df_cong.loc[df_cong["congestion_index"].idxmin()]
+        # ================= HUBS =================
+        hubs_df = hubs()
 
-        # ================= SPEED MAX/MIN =================
-        max_speed = df_cong.loc[df_cong["avg_speed"].idxmax()]
-        min_speed = df_cong.loc[df_cong["avg_speed"].idxmin()]
+        hub_heat = [
+            [r["osm_latitude"], r["osm_longitude"]]
+            for _, r in hubs_df.iterrows()
+        ]
 
-        # ================= FIGURE =================
-        fig = px.line(
-            df_cong,
-            x="hour",
-            y="congestion_index",
-            markers=True,
-            # title="Congestion Trend"
-        )
+        hub_layer = folium.FeatureGroup(name="Hubs", show=True)
 
-        # Avg speed line
-        fig.add_scatter(
-            x=df_cong["hour"],
-            y=df_cong["avg_speed"],
-            mode="lines+markers",
-            name="Avg Speed"
-        )
+        if hub_heat:
+            HeatMap(hub_heat, radius=15, blur=20, min_opacity=0.4,  max_zoom=10,       
+).add_to(hub_layer)
 
-        fig.update_layout(height=300)
+        hub_layer.add_to(m1)
 
-        st.plotly_chart(fig, use_container_width=True)
+        # ================= LAYER CONTROL =================
+        folium.LayerControl(collapsed=True).add_to(m1)
 
-    # ================= BAR CHART =================
-    with st.container(border=True):
-        with st.expander("📊 Congestion by Time"):
-            st.write("""This bar chart shows the average congestion index for different time blocks of the day.
-It helps analyze:   
-- Congestion patterns during morning, midday, evening, and night
-- Identifying critical time periods for traffic management .
+        # ================= RENDER =================
+        st_folium(m1, use_container_width=True, height=800)
 
-The highest congestion rate was observed during the midday period between 10 AM and 3 PM, with an average congestion index of 58.2, corresponding to peak urban activity hours when most offices, schools, and commercial centers are operational. In contrast, the lowest congestion levels occurred during nighttime, particularly between 8 PM and 4 AM, when traffic volume is considerably lower. The analysis further indicates that average vehicle speed decreases significantly during highly congested periods and increases during low-traffic hours, demonstrating an inverse relationship between congestion intensity and traffic speed.
-    """)
-
-        block = df_cong.groupby("time_block", as_index=False)["congestion_index"].mean()
-
-        fig1 = px.bar(
-            block,
-            x="time_block",
-            y="congestion_index",
-            color="congestion_index",
-            text="congestion_index"
-        )
-
-        fig1.update_traces(texttemplate='%{text:.1f}', textposition='outside')
-
-        fig1.update_layout(height=300)
-
-        st.plotly_chart(fig1, use_container_width=True) 
+    else:
+        st.info("👈 Select an agency and route")
