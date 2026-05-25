@@ -224,7 +224,7 @@ div[data-testid="stExpander"] {
 
 /* DEFAULT SMALL EXPANDERS */
 div[data-testid="stExpander"] details summary p {
-    font-size: 14px !important;
+    font-size: 16px !important;
     font-weight: 600 !important;
     color: white !important;
     margin: 0 !important;
@@ -248,25 +248,6 @@ div[data-testid="stExpander"] li {
     font-weight: 500 !important;
     line-height: 1.7 !important;
     color: #d0d0d0 !important;
-}
-
-/* =========================================================
-   HERO IMAGE
-========================================================= */
-.hero-wrapper {
-    width: 100vw;
-    margin-left: calc(-50vw + 50%);
-    overflow: hidden;
-}
-
-.hero-img {
-    width: 100vw;
-    height: 450px;
-    object-fit: contain;
-    display: block;
-
-    border-bottom-left-radius: 20px;
-    border-bottom-right-radius: 20px;
 }
 
 /* =========================================================
@@ -575,7 +556,7 @@ with st.container(border=True):
                     box-shadow: 0 4px 12px rgba(0,0,0,0.1);
                 }}
                 .hero-title {{
-                    font-size: 2rem;
+                    font-size:3rem;
                     font-weight: 700;
                     margin-bottom: 0.5rem;
                     color: inherit; /* Adapts to Streamlit's dark/light theme */
@@ -599,7 +580,7 @@ with st.container(border=True):
         st.markdown(
             """
             <div style="text-align: center; padding: 1rem 0;">
-                <h2>KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</h2>
+                <h1>KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</h1>
                 <p style="letter-spacing: 2px; opacity: 0.8;"> • KTM VALLEY  • GTFS FEED 2026</p>
             </div>
             """, 
@@ -616,8 +597,6 @@ kpi = fetch_kpi()
 longest = df_dur.loc[df_dur["duration"].idxmax()]
 shortest = df_dur.loc[df_dur["duration"].idxmin()]
 
-# ---------- KPI ----------
-st.set_page_config(layout="wide")
 # ================= KPI CARDS =================
 with st.container(border=True):
     c1, c2, c3, c4, c5, c6 = st.columns([1,1,1,2,2,2])
@@ -715,7 +694,7 @@ col_filter, col_map1, col_map2 = st.columns([1.5, 3, 1.5])
 # ROUTE COLORS (GLOBAL COLOR MAP)
 # =========================================================
 route_colors = [
-    "blue","red","green","purple","orange","black","brown","yellow"
+    "blue","red","green","purple","orange","black","brown","grey"
 ]
 
 color_emoji_map = {
@@ -726,7 +705,7 @@ color_emoji_map = {
     "orange": "🟧",
     "black": "⬛",
     "brown": "🟫",
-    "yellow": "🟨"
+    "grey": "◼️"
     
 }
 
@@ -743,7 +722,8 @@ route_color_map = {
 # FILTER PANEL CONTAINER
 # =========================================================
 with col_filter:
-        with st.expander("Agencies & Routes", expanded=True):
+        with st.container(border=True):
+            st.markdown("###### 🚍 Agencies & Routes")
 
             agencies = fetch_agencies()
             routes_df = fetch_routes()
@@ -873,23 +853,23 @@ with col_map1:
                     stops_layer.add_to(m1)
 
                     # ================= STOPS HEATMAP =================
-                    stops_heat = [
-                        [r["stop_lat"], r["stop_lon"]]
-                        for _, r in stops_df.iterrows()
-                    ]
+                    # stops_heat = [
+                    #     [r["stop_lat"], r["stop_lon"]]
+                    #     for _, r in stops_df.iterrows()
+                    # ]
 
-                    stops_heat_layer = folium.FeatureGroup(
-                        name="Stops Heatmap",
-                        show=True
-                    )
+                    # stops_heat_layer = folium.FeatureGroup(
+                    #     name="Stops Heatmap",
+                    #     show=True
+                    # )
 
-                    if len(stops_heat) > 0:
-                        HeatMap(
-                            stops_heat,
-                            radius=8
-                        ).add_to(stops_heat_layer)
+                    # if len(stops_heat) > 0:
+                    #     HeatMap(
+                    #         stops_heat,
+                    #         radius=8
+                    #     ).add_to(stops_heat_layer)
 
-                    stops_heat_layer.add_to(m1)
+                    # stops_heat_layer.add_to(m1)
 
                 # ================= HUBS =================
                 hubs_df = hubs()
@@ -970,10 +950,10 @@ with col_map2:
                 color="route_count",
                 color_continuous_scale="turbo"
             )
-
             fig_small.update_layout(
-                height=270,
-                margin=dict(l=5, r=5, t=20, b=5)
+                width=700,   # increase graph width
+                height=400,
+                margin=dict(l=20, r=20, t=40, b=20),  # reduce margins
             )
 
             st.plotly_chart(fig_small, use_container_width=True)
@@ -1140,13 +1120,10 @@ with left_container:
     height=640
 )
     
-# =========================================================
 # RIGHT COLUMN -> CONGESTION
-# =========================================================
+
 with right_container:
-
     with st.container(border=True):
-
         with st.expander("Congestion Trend"):
             st.write("""
 This line chart shows congestion index and average speed by hour.
@@ -1185,7 +1162,7 @@ The maximum congestion rate was **62.02**, observed at **10 AM**, while the mini
         fig.update_layout(height=300)
         st.plotly_chart(fig, use_container_width=True)
 
-    # ================= BAR CHART =================
+# ================= BAR CHART =================
     with st.container(border=True):
         with st.expander("Congestion by Time"):
             st.write("""This bar chart shows the average congestion index for different time blocks of the day.
@@ -1206,8 +1183,11 @@ The highest congestion rate was observed during the midday period between 10 AM 
             text="congestion_index"
         )
 
-        fig1.update_traces(texttemplate='%{text:.1f}', textposition='outside')
-
+        fig1.update_traces(
+    texttemplate='%{text:.1f}',
+    textposition='outside',
+    width=0.9,
+    cliponaxis=False  # 👉 increases bar thickness (0–1 range for categorical charts)
+)
         fig1.update_layout(height=300)
-
         st.plotly_chart(fig1, use_container_width=True) 
