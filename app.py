@@ -146,11 +146,6 @@ div[data-testid="stMetric"]:hover {
     margin-bottom: 12px;
 }
 
-.kpi-icon {
-    font-size: 20px;
-    line-height: 1;
-}
-
 /* pills */
 .kpi-pill {
     font-size: 10px;
@@ -277,26 +272,6 @@ div[data-testid="stExpander"] li {
 /* LAYER CONTROL */
 .leaflet-control {
     font-family: 'Inter', sans-serif !important;
-}
-
-/* =========================================================
-   SCROLLBAR
-========================================================= */
-::-webkit-scrollbar {
-    width: 10px;
-}
-
-::-webkit-scrollbar-track {
-    background: #050505;
-}
-
-::-webkit-scrollbar-thumb {
-    background: #2b2b2b;
-    border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: #3d3d3d;
 }
 
 /* =========================================================
@@ -723,7 +698,7 @@ route_color_map = {
 # =========================================================
 with col_filter:
         with st.container(border=True):
-            st.markdown("###### 🚍 Agencies & Routes")
+            st.markdown("###### Agencies & Routes")
 
             agencies = fetch_agencies()
             routes_df = fetch_routes()
@@ -731,7 +706,7 @@ with col_filter:
             selected_routes = []
             selected_agencies = []
 
-            with st.container(height=650):
+            with st.container(height=750):
 
                 for _, agency_row in agencies.iterrows():
 
@@ -931,7 +906,7 @@ with col_map1:
                 st_folium(
                     m1,
                     use_container_width=True,
-                    height=650
+                    height=750
                 )
 # =========================================================
 # CHART CONTAINER
@@ -954,6 +929,8 @@ with col_map2:
                 width=700,   # increase graph width
                 height=400,
                 margin=dict(l=20, r=20, t=40, b=20),  # reduce margins
+                xaxis_title="Route_Count",
+                yaxis_title="Agency_Name",
             )
 
             st.plotly_chart(fig_small, use_container_width=True)
@@ -977,7 +954,7 @@ with col_map2:
             fig_start.update_layout(
                 height=290,
                 xaxis_title="Starting Stops",
-                yaxis_title="Stops_Count",
+                yaxis_title="Trips from Stop",
                 xaxis_tickangle=-45,
                 font=dict(family="Inter", size=14)
             )
@@ -1159,7 +1136,9 @@ The maximum congestion rate was **62.02**, observed at **10 AM**, while the mini
             name="Avg Speed"
         )
 
-        fig.update_layout(height=300)
+        fig.update_layout(xaxis_title="Hour",
+                yaxis_title="Congestion_Index",
+                height=300)
         st.plotly_chart(fig, use_container_width=True)
 
 # ================= BAR CHART =================
@@ -1189,5 +1168,10 @@ The highest congestion rate was observed during the midday period between 10 AM 
     width=0.9,
     cliponaxis=False  # 👉 increases bar thickness (0–1 range for categorical charts)
 )
-        fig1.update_layout(height=300)
+
+        fig1.update_layout(
+            xaxis_title="Time Block",
+            yaxis_title="Congestion_Index",
+            height=300
+        )
         st.plotly_chart(fig1, use_container_width=True) 
