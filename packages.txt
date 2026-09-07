@@ -1,6 +1,7 @@
 libzip5
 libglpk40
 libprotobuf32t64
-libsuitesparseconfig7
-libamd3
-libcolamd3
+coinor-libcbc3.1
+coinor-libclp1
+coinor-libcoinutils3v5
+coinor-libosi1v5
