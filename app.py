@@ -1157,7 +1157,9 @@ def check_loom_installation():
         if dependency_errors:
             raise RuntimeError(
                 "LOOM binary dependency check failed. Install the system "
-                "packages listed in packages.txt.\n\n" +
+                "packages listed in packages.txt. If libzip.so.4 or the "
+                "requested COIN-OR SONAMEs remain unavailable after install, "
+                "rebuild the LOOM binaries in the deployment environment.\n\n" +
                 "\n\n".join(dependency_errors)
             )
 
