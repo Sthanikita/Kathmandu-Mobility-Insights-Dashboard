@@ -17,6 +17,8 @@ import base64
 import html
 import shlex
 import re
+import platform
+import xml.etree.ElementTree as ET
 st.set_page_config(layout="wide")
 
 pio.templates.default = "plotly_dark"
@@ -803,10 +805,47 @@ ORDER BY duration DESC;
 # ============================================================
 
 LOOM_DIR_WSL = "/home/neetu/loom/build"
+LOOM_DIR_NATIVE = os.getenv(
+    "LOOM_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "loom-binaries"),
+)
 GTFS_ROUTE_TYPE = "bus"
 
 
+def loom_uses_wsl():
+    return platform.system() == "Windows"
+
+
+def loom_binary_path(binary):
+    return os.path.join(LOOM_DIR_NATIVE, binary)
+
+
+def run_loom_command(command):
+    if loom_uses_wsl():
+        result = subprocess.run(
+            ["wsl", "bash", "-lc", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    else:
+        result = subprocess.run(
+            ["bash", "-lc", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "LOOM command failed.\n\n"
+            f"COMMAND:\n{command}\n\nERROR:\n{result.stderr}"
+        )
+    return result.stdout
+
+
 def run_wsl_command(command):
+    """Backward-compatible wrapper for older callers."""
     result = subprocess.run(
         ["wsl", "bash", "-lc", command],
         stdout=subprocess.PIPE,
@@ -822,6 +861,8 @@ def run_wsl_command(command):
 
 
 def windows_path_to_wsl(path):
+    if not loom_uses_wsl():
+        return os.path.abspath(path)
     path = os.path.abspath(path)
     return f"/mnt/{path[0].lower()}{path[2:].replace(chr(92), '/') }"
 
@@ -1055,22 +1096,38 @@ def create_filtered_gtfs(selected_routes_tuple):
 
 
 def check_loom_installation():
-    missing = []
-    for binary in ("gtfs2graph", "topo", "loom", "octi", "transitmap"):
-        result = subprocess.run(
-            [
-                "wsl", "bash", "-lc",
-                f"test -x {shlex.quote(LOOM_DIR_WSL + '/' + binary)}",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if result.returncode:
-            missing.append(binary)
+    binaries = ("gtfs2graph", "topo", "loom", "octi", "transitmap")
+    if loom_uses_wsl():
+        if shutil.which("wsl") is None:
+            raise RuntimeError(
+                "LOOM requires WSL on Windows, but the 'wsl' command was not found."
+            )
+        missing = []
+        for binary in binaries:
+            result = subprocess.run(
+                [
+                    "wsl", "bash", "-lc",
+                    f"test -x {shlex.quote(LOOM_DIR_WSL + '/' + binary)}",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if result.returncode:
+                missing.append(binary)
+    else:
+        missing = [
+            binary for binary in binaries
+            if not os.access(loom_binary_path(binary), os.X_OK)
+        ]
     if missing:
         raise RuntimeError(
             "LOOM executable(s) not found: " + ", ".join(missing) +
-            f". Check LOOM_DIR_WSL ({LOOM_DIR_WSL})."
+            (f". Check LOOM_DIR_WSL ({LOOM_DIR_WSL})." if loom_uses_wsl()
+             else (
+                 ". Streamlit Cloud does not include the LOOM C++ binaries. "
+                 f"Build them during deployment or set LOOM_DIR to a directory "
+                 f"containing the executables ({LOOM_DIR_NATIVE})."
+             ))
         )
 
 
@@ -1081,41 +1138,15 @@ def get_octi_help():
     read the printed flags, then use `octi_extra_args` to pass whichever
     one controls grid/cell size."""
     check_loom_installation()
-    loom_dir = shlex.quote(LOOM_DIR_WSL)
-    result = subprocess.run(
-        ["wsl", "bash", "-lc", f"{loom_dir}/octi -h 2>&1"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    return result.stdout or result.stderr
+    loom_dir = shlex.quote(LOOM_DIR_WSL if loom_uses_wsl() else LOOM_DIR_NATIVE)
+    return run_loom_command(f"{loom_dir}/octi -h 2>&1")
 
 
 def get_transitmap_help():
-    """Run `transitmap -h` against your actual build so you can see whether
-    it exposes a padding/margin flag. transitmap sizes its output SVG
-    canvas from the LINE GEOMETRY only -- it does not budget extra space
-    for station-name text, so long labels near the edge of the map can run
-    past the declared width/height and get clipped once that SVG is
-    embedded elsewhere (see pad_svg_viewbox below, which is the safety net
-    for when no such flag exists or isn't enough on its own)."""
+    """Run `transitmap -h` against the available Loom build."""
     check_loom_installation()
-    loom_dir = shlex.quote(LOOM_DIR_WSL)
-    result = subprocess.run(
-        ["wsl", "bash", "-lc", f"{loom_dir}/transitmap -h 2>&1"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    return result.stdout or result.stderr
-
-
-import xml.etree.ElementTree as ET
-
-_SVG_NS = "http://www.w3.org/2000/svg"
-ET.register_namespace("", _SVG_NS)
-
-
+    loom_dir = shlex.quote(LOOM_DIR_WSL if loom_uses_wsl() else LOOM_DIR_NATIVE)
+    return run_loom_command(f"{loom_dir}/transitmap -h 2>&1")
 def raise_labels_above_markers(svg):
     """Reorder each group's children so <text> elements (station-name
     labels) always come AFTER non-text siblings (station markers, route
@@ -1207,15 +1238,15 @@ def pad_svg_viewbox(svg, pad=150):
             count=1,
         )
     elif w_match and h_match:
-        # No viewBox present -- fall back to synthesising one from
-        # width/height so padding still has a coordinate system to work in.
         w, h = float(w_match.group(1)), float(h_match.group(1))
         new_w, new_h = w + 2 * pad, h + 2 * pad
         svg = re.sub(
-            r'(<svg\b(?![^>]*viewBox))', rf'\1 viewBox="-{pad} -{pad} {new_w} {new_h}"', svg, count=1
+            r'(<svg\b(?![^>]*viewBox))',
+            rf'\1 viewBox="-{pad} -{pad} {new_w} {new_h}"',
+            svg,
+            count=1,
         )
     else:
-        # Nothing to anchor padding to -- return unchanged.
         return svg
 
     if w_match:
@@ -1229,6 +1260,8 @@ def pad_svg_viewbox(svg, pad=150):
 
 
 @st.cache_data(show_spinner=False)
+
+
 def generate_loom_svg(
     selected_routes_tuple,
     schematic=True,
@@ -1241,7 +1274,7 @@ def generate_loom_svg(
         raise ValueError("Please select at least one route.")
     check_loom_installation()
     gtfs_wsl = windows_path_to_wsl(create_filtered_gtfs(selected_routes_tuple))
-    loom_dir = shlex.quote(LOOM_DIR_WSL)
+    loom_dir = shlex.quote(LOOM_DIR_WSL if loom_uses_wsl() else LOOM_DIR_NATIVE)
 
     octi_cmd = f"{loom_dir}/octi"
     if octi_extra_args and octi_extra_args.strip():
@@ -1264,7 +1297,7 @@ def generate_loom_svg(
         + (f"{octi_cmd} | " if schematic else "")
         + transitmap_cmd
     )
-    svg = run_wsl_command(command)
+    svg = run_loom_command(command)
     if not svg or "<svg" not in svg.lower():
         raise RuntimeError(
             f"LOOM did not return a valid SVG.\n\nOutput:\n{svg[:2000]}"
