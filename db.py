@@ -2,11 +2,16 @@ import pandas as pd
 import geopandas as gpd
 from shapely.geometry import LineString
 import sqlalchemy
+import os
+import streamlit as st
 
 # ---------------- DB CONNECTION ----------------
 def get_engine():
+    db_url = os.getenv("DB_URL") or st.secrets.get("DB_URL")
+    if not db_url:
+        raise RuntimeError("Set DB_URL in Streamlit secrets or the environment.")
     return sqlalchemy.create_engine(
-        "postgresql://postgres:Shresthaniki9742@localhost:5432/GTFS_KATHMANDU"
+        db_url
     )
 
 # ---------------- ROUTES ----------------

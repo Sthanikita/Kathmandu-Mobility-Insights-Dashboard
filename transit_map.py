@@ -13,6 +13,10 @@ import tempfile
 import zipfile
 import shutil
 import os
+import base64
+import html
+import shlex
+import re
 st.set_page_config(layout="wide")
 
 pio.templates.default = "plotly_dark"
@@ -405,6 +409,62 @@ def fetch_agencies():
         engine
     )
 
+@st.cache_data
+def get_route_agency_map():
+    """route_id -> agency_name, used to append the operating agency onto
+    route labels wherever a legend is rendered (Transit Map, LOOM map)."""
+    routes_df = fetch_routes()
+    agencies_df = fetch_agencies()
+    merged = routes_df.merge(agencies_df, on="agency_id", how="left")
+    merged["agency_name"] = merged["agency_name"].fillna("Unknown Agency")
+    return dict(zip(merged["route_id"], merged["agency_name"]))
+
+# ================= SHARED ROUTE COLORS (SINGLE SOURCE OF TRUTH) =================
+# Every route gets ONE color name + ONE hex value, assigned here and reused
+# everywhere: the sidebar checkboxes/emoji swatches, the Live folium map,
+# the Plotly "Transit Map", and the LOOM SVG map. This is what makes the
+# LOOM map's colors match the route colors the user selects in the sidebar.
+ROUTE_COLOR_NAMES = [
+    "blue", "red", "green", "purple", "orange", "black", "brown", "grey"
+]
+
+ROUTE_COLOR_HEX = {
+    "blue":   "#1d4ed8",
+    "red":    "#dc2626",
+    "green":  "#16a34a",
+    "purple": "#7c3aed",
+    "orange": "#ea580c",
+    "black":  "#111111",
+    "brown":  "#92400e",
+    "grey":   "#4b5563",
+}
+
+COLOR_EMOJI_MAP = {
+    "blue": "🟦",
+    "red": "🟥",
+    "green": "🟩",
+    "purple": "🟪",
+    "orange": "🟧",
+    "black": "⬛",
+    "brown": "🟫",
+    "grey": "◼️",
+}
+
+
+@st.cache_data
+def get_route_color_maps():
+    """Returns (name_map, hex_map): route_id -> color name, and
+    route_id -> hex value, assigned in a fixed, stable order over all
+    routes so the same route always gets the same color everywhere."""
+    df = fetch_routes()
+    name_map = {
+        rid: ROUTE_COLOR_NAMES[i % len(ROUTE_COLOR_NAMES)]
+        for i, rid in enumerate(df["route_id"])
+    }
+    hex_map = {rid: ROUTE_COLOR_HEX[name] for rid, name in name_map.items()}
+    return name_map, hex_map
+
+
 # ================= STARTING STOPS (NEW FEATURE) =================
 @st.cache_data
 def fetch_starting_stops():
@@ -481,44 +541,51 @@ def route_stops_ordered(route_id):
 
 
 def build_transit_map(selected_routes, route_color_map, route_name_map,
-                       title_text="Transit Map of Kathmandu"):
-    """Builds a schematic (metro-style) transit map for the selected routes:
-    one colored line per route, every stop marked and labeled (with a
-    staggered layout to reduce overlap), a centered title, a Plotly legend,
-    and responsive axes that stay centered on zoom/pan/rerun.
-
-    FIX (route clipping on zoom): `uirevision` used to be a hardcoded
-    constant ("transit-map"), which told Plotly to always keep the very
-    FIRST zoom/pan/axis-range it ever computed, even after the underlying
-    data changed (different routes selected). That meant `autorange` never
-    got to re-fit the axes to the new geometry, so stops/lines outside the
-    stale viewport looked "cut off" no matter how far you zoomed in.
-
-    Now `uirevision` is derived from the actual selected routes, so:
-      - Toggling/panning/zooming with the SAME routes selected keeps your
-        current view (sticky, as intended).
-      - Changing which routes are selected changes uirevision, so Plotly
-        drops the stale view and autorange recomputes fresh bounds that
-        include every point of the new selection.
-    `cliponaxis=False` is also applied to the route LINE trace (it was only
-    on the stops/markers trace before), so lines/markers/text are never
-    hard-clipped exactly at the plot border when you zoom in tight.
-    """
+                       route_agency_map=None,
+                       title_text="Transit Map of Kathmandu Valley"):
     fig = go.Figure()
 
     any_data = False
+    labeled_stops = set()
+    map_lons = []
+    map_lats = []
 
-    # cycle stop-label positions so nearby stops don't stack their text
-    # on top of one another
-    label_positions = [
-        "top center", "bottom center", "middle right", "middle left",
-        "top right", "bottom left", "top left", "bottom right"
-    ]
+    def format_stop_name(stop_name, max_chars=20):
+        """Wrap stop names without removing any characters."""
+        if pd.isna(stop_name):
+            return ""
 
-    # tracks stops already given a visible text label (by rounded coords)
-    # so a stop shared by multiple routes is only labeled ONCE on the map
-    labeled_stop_keys = set()
-    label_counter = 0
+        stop_name = str(stop_name).strip()
+        if not stop_name:
+            return ""
+
+        words = stop_name.split()
+        lines = []
+        current_line = ""
+
+        for word in words:
+            if len(word) > max_chars:
+                if current_line:
+                    lines.append(current_line)
+                    current_line = ""
+                lines.append(word)
+                continue
+
+            if not current_line:
+                current_line = word
+                continue
+
+            proposed_line = current_line + " " + word
+            if len(proposed_line) <= max_chars:
+                current_line = proposed_line
+            else:
+                lines.append(current_line)
+                current_line = word
+
+        if current_line:
+            lines.append(current_line)
+
+        return "<br>".join(lines)
 
     for route_id in selected_routes:
         ordered = route_stops_ordered(route_id)
@@ -526,54 +593,87 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             continue
 
         any_data = True
-        color = route_color_map.get(route_id, "blue")
+        map_lons.extend(pd.to_numeric(ordered["stop_lon"], errors="coerce").dropna().tolist())
+        map_lats.extend(pd.to_numeric(ordered["stop_lat"], errors="coerce").dropna().tolist())
+        base_color = route_color_map.get(route_id, "blue")
+        color = ROUTE_COLOR_HEX.get(base_color, base_color)
         route_label = route_name_map.get(route_id, route_id)
+        agency_label = (route_agency_map or {}).get(route_id, "Unknown Agency")
+        agency_group = f"agency-{agency_label}"
+        first_agency_route = not any(
+            trace.legendgroup == agency_group for trace in fig.data
+        )
+
+        if first_agency_route:
+            fig.add_trace(go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(size=1, color="rgba(0,0,0,0)"),
+                name=f"<b>{html.escape(str(agency_label))}</b>",
+                legendgroup=agency_group,
+                hoverinfo="skip",
+                uid=f"agency-{agency_label}",
+            ))
 
         # route line connecting stops in sequence
         fig.add_trace(go.Scatter(
             x=ordered["stop_lon"],
             y=ordered["stop_lat"],
             mode="lines",
-            line=dict(color=color, width=4),
+            line=dict(color=color, width=8),  # thicker line (was 4)
             name=route_label,
             hoverinfo="skip",
-            legendgroup=route_id,
+            legendgroup=agency_group,
             uid=f"line-{route_id}",
             cliponaxis=False,  # don't hard-clip the line right at the axis edge
         ))
 
-        # build labels: only the FIRST time a stop (by coordinates) is seen
-        # across all selected routes gets visible text; repeats stay blank
-        # but still show their marker and full name on hover
         display_texts = []
-        text_positions = []
-
         for _, stop_row in ordered.iterrows():
-            stop_key = (round(stop_row["stop_lat"], 5), round(stop_row["stop_lon"], 5))
-
-            if stop_key not in labeled_stop_keys:
-                labeled_stop_keys.add(stop_key)
-                display_texts.append(stop_row["stop_name"])
-                text_positions.append(label_positions[label_counter % len(label_positions)])
-                label_counter += 1
-            else:
-                display_texts.append("")
-                text_positions.append("top center")
+            stop_name = "" if pd.isna(stop_row["stop_name"]) else str(stop_row["stop_name"]).strip()
+            stop_key = (
+                stop_name.casefold(),
+                round(float(stop_row["stop_lat"]), 6),
+                round(float(stop_row["stop_lon"]), 6),
+            )
+            display_texts.append(
+                format_stop_name(stop_name) if stop_key not in labeled_stops else ""
+            )
+            labeled_stops.add(stop_key)
 
         fig.add_trace(go.Scatter(
             x=ordered["stop_lon"],
             y=ordered["stop_lat"],
-            mode="markers+text",
-            marker=dict(size=8, color="white", line=dict(color=color, width=2)),
-            text=display_texts,
-            textposition=text_positions,
-            textfont=dict(size=8, color="#111111"),
+            mode="markers",
+            marker=dict(
+                size=9,
+                color="white",
+                line=dict(color=color, width=3),
+            ),
             hovertext=ordered["stop_name"],
-            hoverinfo="text",
+            hovertemplate="<b>%{hovertext}</b><extra></extra>",
             showlegend=False,
-            legendgroup=route_id,
+            legendgroup=agency_group,
             cliponaxis=False,
             uid=f"stops-{route_id}",
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=ordered["stop_lon"],
+            y=ordered["stop_lat"],
+            mode="text",
+            text=display_texts,
+            textposition="top center",
+            textfont=dict(
+                size=12,
+                color="#111111",
+                family="Arial, sans-serif",
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+            cliponaxis=False,
+            uid=f"stop-labels-{route_id}",
         ))
 
     fig.update_layout(
@@ -610,19 +710,20 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             autorange=True,
         ),
         autosize=True,
-        height=650,
-        margin=dict(t=60, b=90, l=20, r=20),
+        height=700,
+        margin=dict(t=100, b=150, l=160, r=160),
         hovermode="closest",
         dragmode="pan",
-        # FIX: was a hardcoded constant string before, which froze the
-        # zoom/pan/axis-range from the very first render forever, causing
-        # the map to look "cut off" once a different route selection
-        # produced geometry outside that stale, locked viewport. Tying it
-        # to the actual selected routes means the view only stays sticky
-        # while the SAME routes are selected, and properly resets/refits
-        # (autorange runs again) whenever the selection changes.
         uirevision=",".join(sorted(selected_routes)),
     )
+
+    if map_lons and map_lats:
+        lon_min, lon_max = min(map_lons), max(map_lons)
+        lat_min, lat_max = min(map_lats), max(map_lats)
+        lon_padding = max((lon_max - lon_min) * 0.10, 0.003)
+        lat_padding = max((lat_max - lat_min) * 0.10, 0.003)
+        fig.update_xaxes(range=[lon_min - lon_padding, lon_max + lon_padding])
+        fig.update_yaxes(range=[lat_min - lat_padding, lat_max + lat_padding])
 
     if not any_data:
         fig.add_annotation(
@@ -697,16 +798,852 @@ GROUP BY t.route_id, t.trip_id
 ORDER BY duration DESC;
     """, get_engine())
 
+# ============================================================
+# LOOM TRANSIT MAP
+# ============================================================
+
+LOOM_DIR_WSL = "/home/neetu/loom/build"
+GTFS_ROUTE_TYPE = "bus"
+
+
+def run_wsl_command(command):
+    result = subprocess.run(
+        ["wsl", "bash", "-lc", command],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "LOOM command failed.\n\n"
+            f"COMMAND:\n{command}\n\nERROR:\n{result.stderr}"
+        )
+    return result.stdout
+
+
+def windows_path_to_wsl(path):
+    path = os.path.abspath(path)
+    return f"/mnt/{path[0].lower()}{path[2:].replace(chr(92), '/') }"
+
+
+def _sql_values(values):
+    return ",".join(
+        "'" + str(value).replace("'", "''") + "'"
+        for value in values
+    )
+
+
+def normalize_gtfs_date(value):
+    if value is None or pd.isna(value):
+        return ""
+    value = str(value).strip()
+    if not value:
+        return ""
+    if len(value) == 8 and value.isdigit():
+        return value
+    try:
+        return pd.to_datetime(value).strftime("%Y%m%d")
+    except Exception:
+        return value
+
+
+@st.cache_data(show_spinner=False)
+def create_filtered_gtfs(selected_routes_tuple):
+    selected_routes = list(selected_routes_tuple)
+    if not selected_routes:
+        raise ValueError("No route was selected.")
+
+    engine = get_engine()
+    route_values = _sql_values(selected_routes)
+    routes_df = pd.read_sql(
+        f"SELECT * FROM routes WHERE route_id IN ({route_values})", engine
+    )
+    trips_df = pd.read_sql(
+        f"SELECT * FROM trips WHERE route_id IN ({route_values})", engine
+    )
+    if routes_df.empty:
+        raise ValueError("Selected route(s) were not found in routes table.")
+    if trips_df.empty:
+        raise ValueError("No trips found for selected route(s).")
+
+    trip_values = _sql_values(trips_df["trip_id"].dropna().unique())
+    stop_times_df = pd.read_sql(
+        f"SELECT * FROM stop_times WHERE trip_id IN ({trip_values}) "
+        "ORDER BY trip_id, stop_sequence",
+        engine,
+    )
+    if stop_times_df.empty:
+        raise ValueError("No stop_times found for selected route(s).")
+
+    stop_values = _sql_values(stop_times_df["stop_id"].dropna().unique())
+    stops_df = pd.read_sql(
+        f"SELECT * FROM stops WHERE stop_id IN ({stop_values})", engine
+    )
+    if stops_df.empty:
+        raise ValueError("No stops found for selected route(s).")
+
+    tables = {
+        "routes": routes_df,
+        "trips": trips_df,
+        "stop_times": stop_times_df,
+        "stops": stops_df,
+    }
+
+    if routes_df["route_id"].isna().any():
+        raise ValueError("Selected routes contain an empty route_id.")
+    if "route_type" not in routes_df:
+        routes_df["route_type"] = 3
+    else:
+        routes_df["route_type"] = pd.to_numeric(
+            routes_df["route_type"], errors="coerce"
+        ).fillna(3).astype(int)
+
+    if "agency_id" not in routes_df or routes_df["agency_id"].isna().any():
+        raise ValueError("Selected routes contain a missing agency_id.")
+    if "service_id" not in trips_df or trips_df["service_id"].isna().any():
+        raise ValueError("Selected trips contain a missing service_id.")
+
+    # Force route_color to match the exact colors used in the sidebar /
+    # Transit Map (ROUTE_COLOR_HEX), so the LOOM SVG map's line colors are
+    # the same as the colors the user selected, not whatever is (or isn't)
+    # in the raw GTFS feed's route_color column.
+    _, route_hex_map = get_route_color_maps()
+    routes_df["route_color"] = (
+        routes_df["route_id"]
+        .map(route_hex_map)
+        .fillna("#1d4ed8")
+        .astype(str)
+        .str.lstrip("#")
+        .str.upper()
+    )
+    routes_df["route_text_color"] = "FFFFFF"
+
+    shapes_df = pd.DataFrame()
+
+    if "wheelchair_boarding" in stops_df:
+        stops_df["wheelchair_boarding"] = pd.to_numeric(
+            stops_df["wheelchair_boarding"], errors="coerce"
+        ).fillna(0).astype(int)
+        stops_df.loc[
+            ~stops_df["wheelchair_boarding"].isin([0, 1, 2]),
+            "wheelchair_boarding",
+        ] = 0
+    else:
+        stops_df["wheelchair_boarding"] = 0
+
+    if "location_type" in stops_df:
+        stops_df["location_type"] = pd.to_numeric(
+            stops_df["location_type"], errors="coerce"
+        ).fillna(0).astype(int)
+        stops_df.loc[
+            ~stops_df["location_type"].isin([0, 1, 2, 3, 4]),
+            "location_type",
+        ] = 0
+    else:
+        stops_df["location_type"] = 0
+
+    if "parent_station" in stops_df:
+        stops_df["parent_station"] = stops_df["parent_station"].fillna("")
+    else:
+        stops_df["parent_station"] = ""
+
+    for column in ("stop_lat", "stop_lon"):
+        stops_df[column] = pd.to_numeric(stops_df[column], errors="coerce")
+    stops_df = stops_df.dropna(subset=["stop_lat", "stop_lon"])
+
+    for column in ("stop_sequence", "pickup_type", "drop_off_type"):
+        if column in stop_times_df:
+            stop_times_df[column] = pd.to_numeric(
+                stop_times_df[column], errors="coerce"
+            ).fillna(0).astype(int)
+
+    if "shape_id" in trips_df:
+        shape_values = trips_df["shape_id"].dropna().unique()
+        if len(shape_values):
+            shapes_df = pd.read_sql(
+                f"SELECT * FROM shapes WHERE shape_id IN ({_sql_values(shape_values)}) "
+                "ORDER BY shape_id, shape_pt_sequence",
+                engine,
+            )
+
+    if not shapes_df.empty:
+        for column in ("shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"):
+            if column in shapes_df:
+                shapes_df[column] = pd.to_numeric(
+                    shapes_df[column], errors="coerce"
+                )
+        if "shape_pt_sequence" in shapes_df:
+            shapes_df["shape_pt_sequence"] = (
+                shapes_df["shape_pt_sequence"].fillna(0).astype(int)
+            )
+        coordinate_columns = [
+            column for column in ("shape_pt_lat", "shape_pt_lon")
+            if column in shapes_df
+        ]
+        if coordinate_columns:
+            shapes_df = shapes_df.dropna(subset=coordinate_columns)
+        tables["shapes"] = shapes_df
+
+    if "agency_id" in routes_df:
+        agency_df = pd.read_sql(
+            f"SELECT * FROM agency WHERE agency_id IN "
+            f"({_sql_values(routes_df['agency_id'].dropna().unique())})",
+            engine,
+        )
+        if agency_df.empty:
+            raise ValueError("No agency records found for selected routes.")
+
+        required_agency_defaults = {
+            "agency_name": "Kathmandu Transit",
+            "agency_url": "https://example.com/",
+            "agency_timezone": "Asia/Kathmandu",
+        }
+        for column, default in required_agency_defaults.items():
+            if column not in agency_df:
+                agency_df[column] = default
+            else:
+                agency_df[column] = agency_df[column].fillna("").astype(str).str.strip()
+                agency_df.loc[agency_df[column] == "", column] = default
+        tables["agency"] = agency_df
+
+    if "service_id" in trips_df:
+        service_values = _sql_values(trips_df["service_id"].dropna().unique())
+        for table in ("calendar", "calendar_dates"):
+            try:
+                tables[table] = pd.read_sql(
+                    f"SELECT * FROM {table} WHERE service_id IN ({service_values})",
+                    engine,
+                )
+            except Exception:
+                pass
+
+    if "calendar" in tables:
+        for column in ("start_date", "end_date"):
+            if column in tables["calendar"]:
+                tables["calendar"][column] = tables["calendar"][column].apply(
+                    normalize_gtfs_date
+                )
+
+    if "calendar_dates" in tables and "date" in tables["calendar_dates"]:
+        tables["calendar_dates"]["date"] = tables["calendar_dates"]["date"].apply(
+            normalize_gtfs_date
+        )
+
+    temp_dir = tempfile.mkdtemp(prefix="loom_gtfs_")
+    try:
+        for table_name, dataframe in tables.items():
+            for column in dataframe.select_dtypes(include=["object", "string"]):
+                dataframe[column] = dataframe[column].fillna("").astype(str)
+            dataframe.to_csv(
+                os.path.join(temp_dir, f"{table_name}.txt"),
+                index=False,
+                na_rep="",
+            )
+
+        zip_path = os.path.join(tempfile.gettempdir(), "loom_selected_routes.zip")
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for filename in os.listdir(temp_dir):
+                zip_file.write(
+                    os.path.join(temp_dir, filename),
+                    arcname=filename,
+                )
+        return zip_path
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def check_loom_installation():
+    missing = []
+    for binary in ("gtfs2graph", "topo", "loom", "octi", "transitmap"):
+        result = subprocess.run(
+            [
+                "wsl", "bash", "-lc",
+                f"test -x {shlex.quote(LOOM_DIR_WSL + '/' + binary)}",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode:
+            missing.append(binary)
+    if missing:
+        raise RuntimeError(
+            "LOOM executable(s) not found: " + ", ".join(missing) +
+            f". Check LOOM_DIR_WSL ({LOOM_DIR_WSL})."
+        )
+
+
+def get_octi_help():
+    """Run `octi -h` against your actual build so you can see the real flag
+    names it supports (e.g. cell/grid size, base grid type, penalties)
+    instead of guessing. Call this from the UI (Advanced expander) once,
+    read the printed flags, then use `octi_extra_args` to pass whichever
+    one controls grid/cell size."""
+    check_loom_installation()
+    loom_dir = shlex.quote(LOOM_DIR_WSL)
+    result = subprocess.run(
+        ["wsl", "bash", "-lc", f"{loom_dir}/octi -h 2>&1"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout or result.stderr
+
+
+def get_transitmap_help():
+    """Run `transitmap -h` against your actual build so you can see whether
+    it exposes a padding/margin flag. transitmap sizes its output SVG
+    canvas from the LINE GEOMETRY only -- it does not budget extra space
+    for station-name text, so long labels near the edge of the map can run
+    past the declared width/height and get clipped once that SVG is
+    embedded elsewhere (see pad_svg_viewbox below, which is the safety net
+    for when no such flag exists or isn't enough on its own)."""
+    check_loom_installation()
+    loom_dir = shlex.quote(LOOM_DIR_WSL)
+    result = subprocess.run(
+        ["wsl", "bash", "-lc", f"{loom_dir}/transitmap -h 2>&1"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout or result.stderr
+
+
+import xml.etree.ElementTree as ET
+
+_SVG_NS = "http://www.w3.org/2000/svg"
+ET.register_namespace("", _SVG_NS)
+
+
+def raise_labels_above_markers(svg):
+    """Reorder each group's children so <text> elements (station-name
+    labels) always come AFTER non-text siblings (station markers, route
+    lines) in document order.
+
+    WHY THIS EXISTS: SVG paints elements in document order -- whatever
+    comes later in the markup is drawn on top. LOOM's `transitmap` output
+    apparently emits each station's label <text> BEFORE that station's
+    marker shape (the white pill/capsule outline) in some groups, so the
+    marker gets painted over the start of the label. That's what makes
+    names look truncated from the front, e.g. "Machhapokhari" rendering
+    as "achha Pokhari" -- the "M" (and sometimes the next letter) is
+    hidden under the marker, not actually missing from the data.
+
+    This function only reorders SIBLINGS within their existing parent
+    element -- it never moves a <text> node to a different parent -- so
+    any transform="..." on an ancestor <g> is preserved and coordinates
+    stay correct. It walks the whole tree, so nested groups are covered.
+
+    NOTE: this does not address stops with NO label at all. That looks
+    like LOOM's own automatic label-overlap avoidance choosing to drop a
+    conflicting label rather than draw overlapping text -- a layout
+    decision made inside LOOM itself, not a draw-order issue. If that
+    keeps happening, check `transitmap -h` (see get_transitmap_help()) for
+    a flag that controls label density/overlap tolerance, or try
+    increasing line_spacing so fewer stations end up close enough to
+    trigger the conflict in the first place.
+    """
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        # If LOOM's output isn't strict XML for some reason, skip this
+        # post-processing step rather than risk corrupting the SVG.
+        return svg
+
+    def tag_local(el):
+        return el.tag.split('}')[-1] if '}' in el.tag else el.tag
+
+    def reorder(el):
+        children = list(el)
+        if children:
+            non_text = [c for c in children if tag_local(c) != 'text']
+            text_els = [c for c in children if tag_local(c) == 'text']
+            if text_els and non_text:
+                for c in children:
+                    el.remove(c)
+                for c in non_text + text_els:
+                    el.append(c)
+        for c in el:
+            reorder(c)
+
+    reorder(root)
+    return ET.tostring(root, encoding="unicode")
+
+
+def pad_svg_viewbox(svg, pad=150):
+    """Expand an SVG's viewBox (and its width/height attributes) by `pad`
+    pixels on every side.
+
+    WHY THIS EXISTS: LOOM's `transitmap` binary sizes the SVG canvas from
+    the route-line geometry, not from how wide the station-name text is.
+    Station labels are real <text> elements that can sit partway (or
+    fully) outside that geometric bounding box. Anything downstream that
+    embeds this SVG into a fixed-size viewport -- our own <image> tag in
+    build_composite_svg(), a bare <img> tag, or a browser rendering the
+    raw SVG file directly -- will hard-clip at the declared width/height,
+    which is what makes station names look cut off/incomplete on the LOOM
+    map specifically (the Plotly "Transit Map" view is unaffected, since
+    it lays out its own text with `cliponaxis=False` and axis autorange).
+
+    Padding the viewBox out (while also enlarging width/height so the
+    aspect ratio and coordinate system stay consistent) gives the label
+    text room to sit inside the canvas instead of right at its edge.
+    """
+    vb_match = re.search(
+        r'viewBox="([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)"', svg
+    )
+    w_match = re.search(r'width="([\d.]+)', svg)
+    h_match = re.search(r'height="([\d.]+)', svg)
+
+    if vb_match:
+        x, y, w, h = (float(g) for g in vb_match.groups())
+        new_x, new_y = x - pad, y - pad
+        new_w, new_h = w + 2 * pad, h + 2 * pad
+        svg = re.sub(
+            r'viewBox="[\-\d.]+\s+[\-\d.]+\s+[\-\d.]+\s+[\-\d.]+"',
+            f'viewBox="{new_x} {new_y} {new_w} {new_h}"',
+            svg,
+            count=1,
+        )
+    elif w_match and h_match:
+        # No viewBox present -- fall back to synthesising one from
+        # width/height so padding still has a coordinate system to work in.
+        w, h = float(w_match.group(1)), float(h_match.group(1))
+        new_w, new_h = w + 2 * pad, h + 2 * pad
+        svg = re.sub(
+            r'(<svg\b(?![^>]*viewBox))', rf'\1 viewBox="-{pad} -{pad} {new_w} {new_h}"', svg, count=1
+        )
+    else:
+        # Nothing to anchor padding to -- return unchanged.
+        return svg
+
+    if w_match:
+        w = float(w_match.group(1))
+        svg = re.sub(r'width="[\d.]+"', f'width="{w + 2 * pad}"', svg, count=1)
+    if h_match:
+        h = float(h_match.group(1))
+        svg = re.sub(r'height="[\d.]+"', f'height="{h + 2 * pad}"', svg, count=1)
+
+    return svg
+
+
+@st.cache_data(show_spinner=False)
+def generate_loom_svg(
+    selected_routes_tuple,
+    schematic=True,
+    octi_extra_args="",
+    line_width=40,
+    line_spacing=20,
+    label_pad=150,
+):
+    if not selected_routes_tuple:
+        raise ValueError("Please select at least one route.")
+    check_loom_installation()
+    gtfs_wsl = windows_path_to_wsl(create_filtered_gtfs(selected_routes_tuple))
+    loom_dir = shlex.quote(LOOM_DIR_WSL)
+
+    octi_cmd = f"{loom_dir}/octi"
+    if octi_extra_args and octi_extra_args.strip():
+        # extra flags discovered via `octi -h` (see get_octi_help), e.g. a
+        # cell/grid-size flag, so the octilinear map doesn't over-distort
+        # long, sparse routes into exaggerated zig-zags
+        octi_cmd += f" {octi_extra_args.strip()}"
+
+    # transitmap's own flags for thicker, more spaced-out lines (route
+    # colors themselves come from routes.txt route_color / route_color_map)
+    transitmap_cmd = (
+        f"{loom_dir}/transitmap -l "
+        f"--line-width {line_width} --line-spacing {line_spacing}"
+    )
+
+    command = (
+        "set -o pipefail; "
+        f"{loom_dir}/gtfs2graph -m {shlex.quote(GTFS_ROUTE_TYPE)} "
+        f"{shlex.quote(gtfs_wsl)} | {loom_dir}/topo | {loom_dir}/loom | "
+        + (f"{octi_cmd} | " if schematic else "")
+        + transitmap_cmd
+    )
+    svg = run_wsl_command(command)
+    if not svg or "<svg" not in svg.lower():
+        raise RuntimeError(
+            f"LOOM did not return a valid SVG.\n\nOutput:\n{svg[:2000]}"
+        )
+
+    # FIX (letters hidden under station markers, e.g. "Machhapokhari"
+    # rendering as "achha Pokhari"): reorder siblings so text always
+    # paints on top of markers/lines. Must run BEFORE pad_svg_viewbox,
+    # since that only touches the outer viewBox/width/height, not
+    # element order.
+    svg = raise_labels_above_markers(svg)
+
+    # FIX (incomplete/clipped stop names on the LOOM map): transitmap sizes
+    # the SVG canvas from line geometry only, so long station labels near
+    # the edges can sit outside the declared width/height and get clipped
+    # once this SVG is embedded downstream. Pad the canvas out here, right
+    # at the source, before anything else touches it.
+    if label_pad and label_pad > 0:
+        svg = pad_svg_viewbox(svg, pad=label_pad)
+
+    return svg
+
+
+def add_route_title_to_svg(
+    svg, selected_routes, route_name_map, title_text="Transit Map of Kathmandu Valley"
+):
+    return svg
+
+
+def build_composite_svg(
+    svg, selected_routes, route_name_map, route_color_hex_map,
+    route_agency_map=None,
+    title_text="Transit Map of Kathmandu Valley"
+):
+    """Builds a single, self-contained SVG that embeds the raw LOOM SVG
+    output plus a real title and legend drawn as native SVG elements.
+
+    This exists because the raw LOOM output (from `generate_loom_svg`) is
+    just the map itself -- the title header and legend box shown on screen
+    are separate HTML <div>s layered around the <img>, not part of the SVG
+    data. Downloading the <img> source alone (the old behaviour) therefore
+    always produced a file with no title/legend. Wrapping everything into
+    one composite SVG here means the downloaded .svg (and, via rasterizing
+    this composite, the .png) actually contains the title and legend.
+
+    NOTE: `svg` arriving here has already been through pad_svg_viewbox()
+    inside generate_loom_svg(), so the width/height parsed below already
+    include the label padding -- station names that used to run past the
+    old (unpadded) canvas edge now have room inside it instead of being
+    clipped by the <image> element below.
+    """
+    w_match = re.search(r'width="([\d.]+)', svg)
+    h_match = re.search(r'height="([\d.]+)', svg)
+    w = float(w_match.group(1)) if w_match else 1200.0
+    h = float(h_match.group(1)) if h_match else 800.0
+
+    # Layout constants (all in px, laid out top-to-bottom):
+    #   header_h        -- title-only banner above the map (subtitle removed
+    #                       per request, so this no longer needs room for it)
+    #   legend_header_h -- gap below the map before the "Routes" label,
+    #                       plus room for the label itself
+    #   legend_row_h    -- vertical spacing PER legend row
+    #   legend_bottom_pad -- breathing room after the last legend row
+    #
+    # NOTE (fix): the previous version placed the "Routes" label and the
+    # first legend row only ~4px apart (they were computed from nearly the
+    # same y-offset), so they rendered on top of one another. Spacing is
+    # now generous and each element has its own dedicated offset so rows
+    # can never collide with the header or each other.
+    header_h = 55
+    legend_header_h = 50
+    legend_row_h = 26
+    legend_bottom_pad = 20
+
+    legend_groups = {}
+    for rid in selected_routes:
+        agency = (route_agency_map or {}).get(rid, "Unknown Agency")
+        legend_groups.setdefault(agency, []).append(rid)
+    legend_row_count = sum(1 + len(route_ids) for route_ids in legend_groups.values())
+    legend_h = legend_header_h + legend_row_h * max(legend_row_count, 1) + legend_bottom_pad
+    total_w = w
+    total_h = h + header_h + legend_h
+
+    encoded_inner = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+
+    legend_top = h + header_h  # y where the legend block begins
+    legend_items_svg = []
+    row_index = 0
+    for agency, route_ids in legend_groups.items():
+        y = legend_top + legend_header_h + row_index * legend_row_h
+        legend_items_svg.append(
+            f'<text x="20" y="{y - 4}" font-family="Arial, sans-serif" '
+            f'font-size="13" font-weight="700" fill="#111111">'
+            f'{html.escape(str(agency))}</text>'
+        )
+        row_index += 1
+        for rid in route_ids:
+            y = legend_top + legend_header_h + row_index * legend_row_h
+            color = route_color_hex_map.get(rid, "#1d4ed8")
+            name = html.escape(str(route_name_map.get(rid, rid)))
+            legend_items_svg.append(
+                f'<rect x="34" y="{y - 10}" width="18" height="5" fill="{color}"/>'
+                f'<text x="60" y="{y - 4}" font-family="Arial, sans-serif" '
+                f'font-size="13" fill="#111111">{name}</text>'
+            )
+            row_index += 1
+    legend_svg = "".join(legend_items_svg)
+
+    escaped_title = html.escape(title_text)
+
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="{total_w}" height="{total_h}" viewBox="0 0 {total_w} {total_h}">
+  <rect x="0" y="0" width="{total_w}" height="{total_h}" fill="#ffffff"/>
+  <text x="{total_w / 2}" y="{header_h / 2 + 8}" text-anchor="middle"
+        font-family="Arial, sans-serif" font-size="24" font-weight="700"
+        fill="#111111">{escaped_title}</text>
+  <image x="0" y="{header_h}" width="{w}" height="{h}"
+         xlink:href="data:image/svg+xml;base64,{encoded_inner}"/>
+  <text x="20" y="{legend_top + 24}" font-family="Arial, sans-serif"
+        font-size="14" font-weight="700" fill="#111111">Routes</text>
+  {legend_svg}
+</svg>'''
+
+
+def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None):
+    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    composite_svg = build_composite_svg(
+        svg, selected_routes, route_name_map, route_color_hex_map,
+        route_agency_map=route_agency_map,
+    )
+    composite_b64 = base64.b64encode(composite_svg.encode("utf-8")).decode("ascii")
+
+    legend_groups = {}
+    for route_id in selected_routes:
+        agency = (route_agency_map or {}).get(route_id, "Unknown Agency")
+        legend_groups.setdefault(agency, []).append(route_id)
+
+    legend_items = "".join(
+        f'<div style="font-weight:700; margin:6px 0 2px;">'
+        f'{html.escape(str(agency))}</div>'
+        + "".join(
+            f'<div style="display:flex; align-items:center; gap:7px; margin:3px 0; padding-left:10px;">'
+            f'<span style="width:12px; height:4px; background:{html.escape(str(route_color_hex_map.get(route_id, "#1d4ed8")))}; display:inline-block;"></span>'
+            f'<span>{html.escape(str(route_name_map.get(route_id, route_id)))}</span></div>'
+            for route_id in route_ids
+        )
+        for agency, route_ids in legend_groups.items()
+    )
+    html_code = f"""
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <div id="loom-wrapper" style="position:relative; background:#ffffff;
+         border-radius:8px; overflow:hidden; border:1px solid #ddd;">
+            <div style="padding:14px 18px 10px; background:#ffffff; color:#111111;
+                     text-align:center; font-family:Arial,sans-serif;">
+                <div style="font-size:24px; font-weight:700;">Transit Map of Kathmandu Valley</div>
+            </div>
+      <div id="loom-toolbar" style="display:flex; gap:6px; align-items:center;
+           flex-wrap:wrap; padding:6px 10px; background:#f3f4f6; border-bottom:1px solid #ddd;">
+        <button onclick="loomZoom(1.25)"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #ccc; background:#fff;">➕ Zoom In</button>
+
+        <button onclick="loomZoom(0.8)"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #ccc; background:#fff;">➖ Zoom Out</button>
+        <button onclick="loomReset()"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #ccc; background:#fff;">↺ Reset</button>
+        <span style="width:1px; height:22px; background:#ccc; margin:0 4px;"></span>
+        <button onclick="loomDownloadSVG()"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #ccc; background:#fff;">⬇ SVG</button>
+        <button onclick="loomDownloadPNG()"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #ccc; background:#fff;">⬇ PNG</button>
+        <button onclick="loomFullscreen()"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #ccc; background:#fff; margin-left:auto;">
+                ⛶ Full Screen</button>
+      </div>
+     <div id="loom-scroll" style="position:relative; overflow:auto; width:100%; height:680px;
+         background:#fff; padding:24px 28px 70px 28px; box-sizing:border-box;">
+        <img id="loom-img"
+             src="data:image/svg+xml;base64,{encoded}"
+             alt="LOOM Transit Map"
+             style="display:block; width:88%; max-width:88%; height:auto;
+                    margin:0 auto; transform-origin:0 0; transition:transform 0.15s ease;
+                    cursor:grab; user-select:none; touch-action:none;">
+                <div style="position:absolute; right:18px; bottom:14px; z-index:2;
+                         background:rgba(255,255,255,0.96); border:1px solid #bbb;
+                         padding:8px 12px; color:#111; font:12px Arial,sans-serif;
+                         box-shadow:0 1px 4px rgba(0,0,0,.18);">
+                    <div style="font-weight:700; margin-bottom:4px;">Routes</div>
+                    {legend_items}
+                </div>
+      </div>
+    </div>
+    <script>
+      // Base64 of a complete, standalone SVG that already contains the
+      // title, subtitle, map, and legend baked in as native SVG elements.
+      // Both download buttons below use THIS (not the bare <img> src) so
+      // exported files match what's on screen.
+      const loomCompositeSvgDataUrl = "data:image/svg+xml;base64,{composite_b64}";
+
+      let loomScale = 1;
+            let loomPanX = 0;
+            let loomPanY = 0;
+            let loomDragging = false;
+            let loomDragStartX = 0;
+            let loomDragStartY = 0;
+            let loomStartPanX = 0;
+            let loomStartPanY = 0;
+
+            function loomApplyTransform() {{
+                const img = document.getElementById('loom-img');
+                img.style.transform = 'translate(' + loomPanX + 'px, ' + loomPanY + 'px) scale(' + loomScale + ')';
+            }}
+
+      function loomZoom(factor) {{
+        loomScale = Math.min(Math.max(loomScale * factor, 0.3), 8);
+                loomApplyTransform();
+      }}
+
+      function loomReset() {{
+        loomScale = 1;
+                loomPanX = 0;
+                loomPanY = 0;
+                loomApplyTransform();
+                document.getElementById('loom-scroll').scrollTo(0, 0);
+      }}
+
+            const loomImg = document.getElementById('loom-img');
+            loomImg.addEventListener('pointerdown', function(event) {{
+                loomDragging = true;
+                loomDragStartX = event.clientX;
+                loomDragStartY = event.clientY;
+                loomStartPanX = loomPanX;
+                loomStartPanY = loomPanY;
+                loomImg.setPointerCapture(event.pointerId);
+                loomImg.style.cursor = 'grabbing';
+                loomImg.style.transition = 'none';
+                event.preventDefault();
+            }});
+
+            loomImg.addEventListener('pointermove', function(event) {{
+                if (!loomDragging) return;
+                loomPanX = loomStartPanX + event.clientX - loomDragStartX;
+                loomPanY = loomStartPanY + event.clientY - loomDragStartY;
+                loomApplyTransform();
+                event.preventDefault();
+            }});
+
+            function loomStopDragging(event) {{
+                if (!loomDragging) return;
+                loomDragging = false;
+                loomImg.style.cursor = 'grab';
+                loomImg.style.transition = 'transform 0.15s ease';
+                if (event && loomImg.hasPointerCapture(event.pointerId)) {{
+                    loomImg.releasePointerCapture(event.pointerId);
+                }}
+            }}
+
+            loomImg.addEventListener('pointerup', loomStopDragging);
+            loomImg.addEventListener('pointercancel', loomStopDragging);
+
+      function loomTriggerDownload(url, filename) {{
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }}
+
+      // FIX: previously fetched document.getElementById('loom-img').src,
+      // which is just the bare LOOM map with no title/legend. Now uses the
+      // composite SVG (title + subtitle + map + legend) built server-side.
+      async function loomDownloadSVG() {{
+        try {{
+          const res = await fetch(loomCompositeSvgDataUrl);
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          loomTriggerDownload(url, 'loom_transit_map.svg');
+          setTimeout(() => URL.revokeObjectURL(url), 2000);
+        }} catch (e) {{
+          alert('SVG download failed: ' + e);
+        }}
+      }}
+
+      // FIX: previously drew only the <img> (bare map) onto a canvas, so
+      // the exported PNG had no title/legend either. Now rasterizes the
+      // same composite SVG used for the SVG download, guaranteeing the
+      // PNG and SVG exports always match and both include the header
+      // and legend.
+      async function loomDownloadPNG() {{
+        try {{
+          const scale = 3; // render at higher resolution than on-screen size
+          const tempImg = new Image();
+          tempImg.crossOrigin = 'anonymous';
+
+          tempImg.onload = function() {{
+            const w = tempImg.naturalWidth * scale;
+            const h = tempImg.naturalHeight * scale;
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+            ctx.drawImage(tempImg, 0, 0, w, h);
+
+            canvas.toBlob(function(blob) {{
+              if (!blob) {{ alert('PNG export failed.'); return; }}
+              const url = URL.createObjectURL(blob);
+              loomTriggerDownload(url, 'loom_transit_map.png');
+              setTimeout(() => URL.revokeObjectURL(url), 2000);
+            }}, 'image/png');
+          }};
+
+          tempImg.onerror = function() {{
+            alert('PNG download failed: could not rasterize the composite SVG.');
+          }};
+
+          tempImg.src = loomCompositeSvgDataUrl;
+        }} catch (e) {{
+          alert('PNG download failed: ' + e);
+        }}
+      }}
+
+      function loomFullscreen() {{
+        const el = document.getElementById('loom-wrapper');
+        const scrollEl = document.getElementById('loom-scroll');
+        const isFs = document.fullscreenElement || document.webkitFullscreenElement;
+
+        function applyFullscreenStyle(on) {{
+          if (on) {{
+            el.style.position = 'fixed';
+            el.style.top = '0'; el.style.left = '0';
+            el.style.width = '100vw'; el.style.height = '100vh';
+            el.style.zIndex = '99999';
+            scrollEl.style.height = 'calc(100vh - 44px)';
+          }} else {{
+            el.style.position = 'relative';
+            el.style.width = 'auto'; el.style.height = 'auto';
+            el.style.zIndex = 'auto';
+            scrollEl.style.height = '680px';
+          }}
+        }}
+
+        if (!isFs) {{
+          const req = el.requestFullscreen || el.webkitRequestFullscreen;
+          if (req) {{
+            req.call(el).then(() => applyFullscreenStyle(true))
+                         .catch(() => applyFullscreenStyle(true)); // fallback if blocked
+          }} else {{
+            applyFullscreenStyle(true); // fallback: fill the viewport via CSS only
+          }}
+        }} else {{
+          const exit = document.exitFullscreen || document.webkitExitFullscreen;
+          if (exit) {{ exit.call(document); }}
+          applyFullscreenStyle(false);
+        }}
+      }}
+
+      document.addEventListener('fullscreenchange', () => {{
+        if (!document.fullscreenElement) {{
+          const el = document.getElementById('loom-wrapper');
+          el.style.position = 'relative';
+          el.style.width = 'auto'; el.style.height = 'auto';
+          document.getElementById('loom-scroll').style.height = '680px';
+        }}
+      }});
+    </script>
+    """
+    st.components.v1.html(html_code, height=750, scrolling=True)
+
+
 # ================= APP =================
-import base64
 
-def img_to_base64(path):
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
-
-img = img_to_base64("KTM Vallery.png")
-
-# ================= CONTAINER =================
 def img_to_base64(path):
     try:
         with open(path, "rb") as f:
@@ -874,37 +1811,28 @@ with st.container(border=True):
 col_filter, col_map1, col_map2 = st.columns([1.5, 3, 1.5])
 
 # =========================================================
-# ROUTE COLORS (GLOBAL COLOR MAP)
+# ROUTE COLORS (GLOBAL COLOR MAP) — single source of truth,
+# shared with the LOOM SVG map via create_filtered_gtfs()
 # =========================================================
-route_colors = [
-    "blue","red","green","purple","orange","black","brown","grey"
-]
-
-color_emoji_map = {
-    "blue": "🟦",
-    "red": "🟥",
-    "green": "🟩",
-    "purple": "🟪",
-    "orange": "🟧",
-    "black": "⬛",
-    "brown": "🟫",
-    "grey": "◼️"
-    
-}
+color_emoji_map = COLOR_EMOJI_MAP
 
 # ALL ROUTES
 all_routes_df = fetch_routes()
 
-# FIXED COLOR MAP
-route_color_map = {
-    route_id: route_colors[i % len(route_colors)]
-    for i, route_id in enumerate(all_routes_df["route_id"])
-}
+# FIXED COLOR MAP (name + hex), same assignment used everywhere
+route_color_map, route_color_hex_map = get_route_color_maps()
 
 # ROUTE ID -> ROUTE NAME MAP (for transit map legend, e.g. "Payuntar to Kantipath")
-route_name_map = dict(
-    zip(all_routes_df["route_id"], all_routes_df["route_short_name"])
-)
+# ROUTE ID -> AGENCY NAME MAP (new feature: shown alongside the route name
+# in every legend so it's clear which operator runs which route)
+route_agency_map = get_route_agency_map()
+
+route_name_map = {
+    route_id: route_short_name
+    for route_id, route_short_name in zip(
+        all_routes_df["route_id"], all_routes_df["route_short_name"]
+    )
+}
 
 # =========================================================
 # FILTER PANEL CONTAINER
@@ -1051,25 +1979,6 @@ with col_map1:
 
                         stops_layer.add_to(m1)
 
-                        # ================= STOPS HEATMAP =================
-                        # stops_heat = [
-                        #     [r["stop_lat"], r["stop_lon"]]
-                        #     for _, r in stops_df.iterrows()
-                        # ]
-
-                        # stops_heat_layer = folium.FeatureGroup(
-                        #     name="Stops Heatmap",
-                        #     show=True
-                        # )
-
-                        # if len(stops_heat) > 0:
-                        #     HeatMap(
-                        #         stops_heat,
-                        #         radius=8
-                        #     ).add_to(stops_heat_layer)
-
-                        # stops_heat_layer.add_to(m1)
-
                     # ================= HUBS =================
                     hubs_df = hubs()
 
@@ -1139,7 +2048,8 @@ with col_map1:
                         selected_routes,
                         route_color_map,
                         route_name_map,
-                        title_text="Transit Map of Kathmandu"
+                        route_agency_map=route_agency_map,
+                        title_text="Transit Map of Kathmandu Valley",
                     )
 
                     st.plotly_chart(
@@ -1153,14 +2063,103 @@ with col_map1:
                         }
                     )
 
-                else:  # 🧵 LOOM Map (SVG) - real ad-freiburg/loom pipeline (NEW FEATURE)
+                else:  # LOOM Map (SVG)
+
+                    st.markdown("### LOOM Transit Map")
 
                     schematic = st.checkbox(
                         "Schematic (octilinear) layout",
-                        value=True,
+                        value=False,  # default OFF: shows the geographically
+                                      # accurate shape, which avoids the
+                                      # over-distorted zig-zag look
                         key="loom_schematic_toggle",
-                        help="On: octi schematic map. Off: geographically accurate map."
+                        help=(
+                            "On: octi schematic map (metro-style, may distort "
+                            "long/sparse routes into exaggerated zig-zags "
+                            "unless tuned). Off: geographically accurate map."
+                        ),
                     )
+
+                    octi_extra_args = ""
+                    if schematic:
+                        with st.expander("Advanced: octi tuning flags"):
+                            st.caption(
+                                "octi's default grid/cell size can be too coarse "
+                                "for long, sparse routes, causing the zig-zag "
+                                "distortion. Run the help output below to see "
+                                "your build's real flag names (e.g. for cell "
+                                "size or base grid type), then paste the flag "
+                                "you want into the box."
+                            )
+                            if st.button("Show `octi -h` output", key="octi_help_btn"):
+                                try:
+                                    st.code(get_octi_help())
+                                except Exception as help_error:
+                                    st.error(f"Couldn't fetch octi help: {help_error}")
+
+                            octi_extra_args = st.text_input(
+                                "Extra flags to pass to octi",
+                                value="",
+                                key="octi_extra_args",
+                                placeholder="e.g. -b octilinear <cell-size flag> <value>",
+                            )
+
+                    lw_col, ls_col = st.columns(2)
+                    with lw_col:
+                        loom_line_width = st.slider(
+                            "Line width",
+                            min_value=10, max_value=100, value=40, step=5,
+                            key="loom_line_width",
+                        )
+                    with ls_col:
+                        loom_line_spacing = st.slider(
+                            "Line spacing (parallel routes)",
+                            min_value=5, max_value=60, value=20, step=5,
+                            key="loom_line_spacing",
+                        )
+
+                    # ---- NEW: label padding control (fixes incomplete /
+                    # clipped station names) -------------------------------
+                    with st.expander("Advanced: station label spacing"):
+                        st.caption(
+                            "LOOM sizes the map canvas from the route-line "
+                            "geometry only, not from how wide station-name "
+                            "text is. Labels near the edge of the map can "
+                            "therefore run past that canvas and get clipped "
+                            "('incomplete' stop names). Increasing this pads "
+                            "the canvas so labels have room to render fully."
+                        )
+                        loom_label_pad = st.slider(
+                            "Label padding (px)",
+                            min_value=0, max_value=400, value=150, step=25,
+                            key="loom_label_pad",
+                        )
+                        if st.button("Show `transitmap -h` output", key="transitmap_help_btn"):
+                            try:
+                                st.code(get_transitmap_help())
+                            except Exception as help_error:
+                                st.error(f"Couldn't fetch transitmap help: {help_error}")
+
+                    try:
+                        with st.spinner("Running LOOM pipeline..."):
+                            svg = generate_loom_svg(
+                                tuple(selected_routes),
+                                schematic=schematic,
+                                octi_extra_args=octi_extra_args,
+                                line_width=loom_line_width,
+                                line_spacing=loom_line_spacing,
+                                label_pad=loom_label_pad,
+                            )
+                        display_loom_svg(
+                            svg,
+                            selected_routes,
+                            route_name_map,
+                            route_agency_map,
+                        )
+                        st.success("LOOM map generated successfully.")
+                    except Exception as error:
+                        st.error("LOOM map generation failed.")
+                        st.exception(error)
 
                 
 # =========================================================
@@ -1426,7 +2425,7 @@ The highest congestion rate was observed during the midday period between 10 AM 
 
         fig1.update_layout(
             xaxis_title="Time Block",
-            yaxis_title="Congestion_Index",
+            yaxis_title="Congestion_Index", 
             height=300
         )
         st.plotly_chart(fig1, use_container_width=True)

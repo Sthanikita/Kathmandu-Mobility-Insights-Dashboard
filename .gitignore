@@ -2,3 +2,25 @@
 __pycache__/
 *.pyc
 .env
+.venv/
+.conda/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local build output and generated artifacts
+loom/build/
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+
+# Local editor and OS files
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local data and scratch files
+trash/
