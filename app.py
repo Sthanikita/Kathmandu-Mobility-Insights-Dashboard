@@ -1130,6 +1130,37 @@ def check_loom_installation():
              ))
         )
 
+    if not loom_uses_wsl():
+        dependency_errors = []
+        if shutil.which("ldd") is None:
+            raise RuntimeError(
+                "LOOM dependency check requires ldd, but it was not found."
+            )
+
+        for binary in binaries:
+            path = loom_binary_path(binary)
+            result = subprocess.run(
+                ["ldd", path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            missing_libraries = [
+                line.strip()
+                for line in result.stdout.splitlines()
+                if "not found" in line
+            ]
+            if result.returncode != 0 or missing_libraries:
+                details = "\n".join(missing_libraries) or result.stdout.strip()
+                dependency_errors.append(f"{binary}:\n{details}")
+
+        if dependency_errors:
+            raise RuntimeError(
+                "LOOM binary dependency check failed. Install the system "
+                "packages listed in packages.txt.\n\n" +
+                "\n\n".join(dependency_errors)
+            )
+
 
 def get_octi_help():
     """Run `octi -h` against your actual build so you can see the real flag
