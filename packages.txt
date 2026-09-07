@@ -1,4 +1,4 @@
-libzip5
+libzip4t64
 libglpk40
 libprotobuf32t64
 coinor-libcbc3.1
