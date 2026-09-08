@@ -1,1 +1,7 @@
-libzip5
+libzip4t64
+libglpk40
+libprotobuf32t64
+coinor-libcbc3.1
+coinor-libclp1
+coinor-libcoinutils3v5
+coinor-libosi1v5
