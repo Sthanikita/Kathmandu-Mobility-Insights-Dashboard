@@ -1157,7 +1157,7 @@ def check_loom_installation():
         if dependency_errors:
             raise RuntimeError(
                 "LOOM binary dependency check failed. Install the system "
-                "packages listed in packages.txt. If libzip.so.4 or the "
+                "packages listed in packages.txt. If libzip.so.5 or the "
                 "requested COIN-OR SONAMEs remain unavailable after install, "
                 "rebuild the LOOM binaries in the deployment environment.\n\n" +
                 "\n\n".join(dependency_errors)
@@ -1235,6 +1235,165 @@ def raise_labels_above_markers(svg):
     return ET.tostring(root, encoding="unicode")
 
 
+def scale_label_font_size(svg, scale_factor=1.5):
+    """Scale font sizes encoded in LOOM SVG elements and inline styles."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    def scale_size(match):
+        value = float(match.group(1)) * scale_factor
+        unit = match.group(2) or ""
+        return f"{value:.2f}{unit}"
+
+    def scale_element(element):
+        font_size = element.get("font-size")
+        if font_size:
+            element.set(
+                "font-size",
+                re.sub(r"([\d.]+)([a-zA-Z%]*)", scale_size, font_size, count=1),
+            )
+
+        style = element.get("style")
+        if style and re.search(r"font-size\s*:", style):
+            style = re.sub(
+                r"font-size\s*:\s*([\d.]+)([a-zA-Z%]*)",
+                lambda match: f"font-size:{scale_size(match)}",
+                style,
+            )
+            element.set("style", style)
+
+        for child in element:
+            scale_element(child)
+
+    scale_element(root)
+    return ET.tostring(root, encoding="unicode")
+
+
+def expand_label_clip_paths(svg, scale_factor=1.5):
+    """Expand clip rectangles that constrain station labels."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    def tag_local(element):
+        return element.tag.split('}')[-1] if '}' in element.tag else element.tag
+
+    id_map = {element.get('id'): element for element in root.iter() if element.get('id')}
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+
+    def find_clip_id(element):
+        current = element
+        while current is not None:
+            clip_value = current.get('clip-path')
+            if not clip_value:
+                style = current.get('style', '')
+                match = re.search(r'clip-path\s*:\s*url\(#([^)]+)\)', style)
+                if match:
+                    clip_value = f'url(#{match.group(1)})'
+            if clip_value:
+                match = re.search(r'url\(#([^)]+)\)', clip_value)
+                if match:
+                    return match.group(1)
+            current = parent_map.get(current)
+        return None
+
+    expanded = set()
+    for element in root.iter():
+        if tag_local(element) != 'text':
+            continue
+        clip_id = find_clip_id(element)
+        clip_path = id_map.get(clip_id) if clip_id else None
+        if clip_path is None or clip_id in expanded:
+            continue
+
+        for shape in clip_path:
+            if tag_local(shape) != 'rect':
+                continue
+            try:
+                x = float(shape.get('x', 0))
+                y = float(shape.get('y', 0))
+                width = float(shape.get('width', 0))
+                height = float(shape.get('height', 0))
+            except (TypeError, ValueError):
+                continue
+            new_width = width * scale_factor
+            new_height = height * scale_factor
+            shape.set('x', str(x - (new_width - width) / 2))
+            shape.set('y', str(y - (new_height - height) / 2))
+            shape.set('width', str(new_width))
+            shape.set('height', str(new_height))
+        expanded.add(clip_id)
+
+    return ET.tostring(root, encoding="unicode")
+
+
+def bring_labels_to_front(svg):
+    """Move all SVG text labels to the document's paint-order front."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    def tag_local(element):
+        return element.tag.split('}')[-1] if '}' in element.tag else element.tag
+
+    namespace = root.tag.split('}')[0] + '}' if root.tag.startswith('{') else ''
+    root.attrib.pop('clip-path', None)
+    root_style = root.get('style')
+    if root_style:
+        root_style = re.sub(
+            r'(^|;)\s*clip-path\s*:\s*url\(#[^)]+\)\s*;?',
+            r'\1',
+            root_style,
+        ).strip('; ')
+        if root_style:
+            root.set('style', root_style)
+        else:
+            root.attrib.pop('style', None)
+    moved = []
+
+    def walk(element, transform_chain):
+        for child in list(element):
+            if tag_local(child) == 'text':
+                element.remove(child)
+                child.attrib.pop('clip-path', None)
+                style = child.get('style')
+                if style:
+                    style = re.sub(
+                        r'(^|;)\s*clip-path\s*:\s*url\(#[^)]+\)\s*;?',
+                        r'\1',
+                        style,
+                    ).strip('; ')
+                    if style:
+                        child.set('style', style)
+                    else:
+                        child.attrib.pop('style', None)
+                moved.append((transform_chain, child))
+                continue
+
+            child_transform = child.get('transform')
+            next_transform = transform_chain
+            if child_transform:
+                next_transform = (transform_chain + ' ' + child_transform).strip()
+            walk(child, next_transform)
+
+    walk(root, '')
+
+    for transform_chain, text_element in moved:
+        if transform_chain:
+            wrapper = ET.Element(namespace + 'g')
+            wrapper.set('transform', transform_chain)
+            wrapper.append(text_element)
+            root.append(wrapper)
+        else:
+            root.append(text_element)
+
+    return ET.tostring(root, encoding="unicode")
+
+
 def pad_svg_viewbox(svg, pad=150):
     """Expand an SVG's viewBox (and its width/height attributes) by `pad`
     pixels on every side.
@@ -1302,6 +1461,7 @@ def generate_loom_svg(
     line_width=40,
     line_spacing=20,
     label_pad=150,
+    label_font_scale=1.0,
 ):
     if not selected_routes_tuple:
         raise ValueError("Please select at least one route.")
@@ -1342,6 +1502,11 @@ def generate_loom_svg(
     # since that only touches the outer viewBox/width/height, not
     # element order.
     svg = raise_labels_above_markers(svg)
+    svg = bring_labels_to_front(svg)
+
+    if label_font_scale and label_font_scale != 1.0:
+        svg = scale_label_font_size(svg, scale_factor=label_font_scale)
+        svg = expand_label_clip_paths(svg, scale_factor=label_font_scale)
 
     # FIX (incomplete/clipped stop names on the LOOM map): transitmap sizes
     # the SVG canvas from line geometry only, so long station labels near
@@ -2200,6 +2365,12 @@ with col_map1:
                             min_value=0, max_value=400, value=150, step=25,
                             key="loom_label_pad",
                         )
+                        loom_label_font_scale = st.slider(
+                            "Label font size x",
+                            min_value=0.5, max_value=3.0, value=1.0, step=0.1,
+                            key="loom_label_font_scale",
+                            help="Multiplies the font size in LOOM station labels.",
+                        )
                         if st.button("Show `transitmap -h` output", key="transitmap_help_btn"):
                             try:
                                 st.code(get_transitmap_help())
@@ -2215,6 +2386,7 @@ with col_map1:
                                 line_width=loom_line_width,
                                 line_spacing=loom_line_spacing,
                                 label_pad=loom_label_pad,
+                                label_font_scale=loom_label_font_scale,
                             )
                         display_loom_svg(
                             svg,
