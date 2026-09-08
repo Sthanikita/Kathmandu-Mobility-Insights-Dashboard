@@ -1,4 +1,4 @@
-import streamlit as st 
+import streamlit as st
 from streamlit_folium import st_folium
 from streamlit_plotly_events import plotly_events
 import folium
@@ -17,6 +17,7 @@ import base64
 import html
 import shlex
 import re
+import math
 import platform
 import xml.etree.ElementTree as ET
 st.set_page_config(layout="wide")
@@ -338,7 +339,7 @@ def get_engine():
 def fetch_kpi():
     engine = get_engine()
     return pd.read_sql("""
-        SELECT 
+        SELECT
             (SELECT COUNT(*) FROM routes) AS routes,
             (SELECT COUNT(*) FROM trips) AS trips,
             (SELECT COUNT(*) FROM stops) AS stops,
@@ -350,7 +351,7 @@ def fetch_kpi():
 def fetch_congestion():
     engine = get_engine()
     return pd.read_sql("""
-        SELECT 
+        SELECT
             EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) AS hour,
             COUNT(*) AS gps_points,
             COUNT(DISTINCT "Location") AS active_vehicles,
@@ -361,12 +362,12 @@ def fetch_congestion():
 
             COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT "Location"), 0) AS congestion_index,
 
-            CASE 
-                WHEN EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) BETWEEN 5 AND 9 
+            CASE
+                WHEN EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) BETWEEN 5 AND 9
                     THEN 'Morning Peak (5–9)'
-                WHEN EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) BETWEEN 10 AND 15 
+                WHEN EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) BETWEEN 10 AND 15
                     THEN 'Midday Flow (10–15)'
-                WHEN EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) BETWEEN 16 AND 19 
+                WHEN EXTRACT(HOUR FROM TO_TIMESTAMP("Date", 'MM/DD/YYYY HH24:MI')) BETWEEN 16 AND 19
                     THEN 'Evening Peak (16–19)'
                 ELSE 'Night Low (20–4)'
             END AS time_block
@@ -381,7 +382,7 @@ def fetch_congestion():
 def routes_per_agency():
     engine = get_engine()
     return pd.read_sql("""
-        SELECT 
+        SELECT
             COALESCE(a.agency_name, 'Unknown') AS agency_name,
             COUNT(r.route_id) AS route_count,
             ROUND(
@@ -472,7 +473,7 @@ def get_route_color_maps():
 def fetch_starting_stops():
     engine = get_engine()
     return pd.read_sql("""
-        SELECT 
+        SELECT
     s.stop_name,
     COUNT(DISTINCT st.trip_id) AS trips_starting_at_stop
 FROM stop_times st
@@ -491,8 +492,8 @@ def route_geom(route_id):
         SELECT ARRAY_AGG(ARRAY[shape_pt_lon, shape_pt_lat]) AS path
         FROM shapes
         WHERE shape_id IN (
-            SELECT DISTINCT shape_id 
-            FROM trips 
+            SELECT DISTINCT shape_id
+            FROM trips
             WHERE route_id = '{route_id}'
         )
     """, engine)
@@ -501,7 +502,7 @@ def route_geom(route_id):
 def stops(route_id):
     engine = get_engine()
     return pd.read_sql(f"""
-        SELECT DISTINCT 
+        SELECT DISTINCT
             s.stop_name,
             s.stop_lat,
             s.stop_lon
@@ -549,10 +550,33 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
 
     any_data = False
     labeled_stops = set()
+    label_points = []
     map_lons = []
     map_lats = []
+    label_annotations = []
 
-    def format_stop_name(stop_name, max_chars=20):
+    # 8-way compass cycle: two adjacent stops never get the same direction,
+    # so labels fan out around the route instead of stacking on it.
+    LABEL_POSITIONS = [
+        # (xshift, yshift, xanchor, yanchor)
+        (0,   20, "center", "bottom"),   # top
+        (0,  -20, "center", "top"),      # bottom
+        (-18, 0,  "right",  "middle"),   # left
+        (18,  0,  "left",   "middle"),   # right
+        (-14, 16, "right",  "bottom"),   # top-left
+        (14,  16, "left",   "bottom"),   # top-right
+        (-14,-16, "right",  "top"),      # bottom-left
+        (14, -16, "left",   "top"),      # bottom-right
+    ]
+    label_cycle = 0
+
+    def next_label_position():
+        nonlocal label_cycle
+        position = LABEL_POSITIONS[label_cycle % len(LABEL_POSITIONS)]
+        label_cycle += 1
+        return position
+
+    def format_stop_name(stop_name, max_chars=16):
         """Wrap stop names without removing any characters."""
         if pd.isna(stop_name):
             return ""
@@ -634,15 +658,24 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         display_texts = []
         for _, stop_row in ordered.iterrows():
             stop_name = "" if pd.isna(stop_row["stop_name"]) else str(stop_row["stop_name"]).strip()
+            stop_lat = float(stop_row["stop_lat"])
+            stop_lon = float(stop_row["stop_lon"])
             stop_key = (
                 stop_name.casefold(),
-                round(float(stop_row["stop_lat"]), 6),
-                round(float(stop_row["stop_lon"]), 6),
+                round(stop_lat, 6),
+                round(stop_lon, 6),
             )
-            display_texts.append(
-                format_stop_name(stop_name) if stop_key not in labeled_stops else ""
+            is_near_existing_label = any(
+                abs(stop_lat - label_lat) < 0.0015
+                and abs(stop_lon - label_lon) < 0.0015
+                for label_lat, label_lon in label_points
             )
-            labeled_stops.add(stop_key)
+            if stop_key in labeled_stops or is_near_existing_label:
+                display_texts.append("")
+            else:
+                display_texts.append(format_stop_name(stop_name))
+                labeled_stops.add(stop_key)
+                label_points.append((stop_lat, stop_lon))
 
         fig.add_trace(go.Scatter(
             x=ordered["stop_lon"],
@@ -661,22 +694,30 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             uid=f"stops-{route_id}",
         ))
 
-        fig.add_trace(go.Scatter(
-            x=ordered["stop_lon"],
-            y=ordered["stop_lat"],
-            mode="text",
-            text=display_texts,
-            textposition="top center",
-            textfont=dict(
-                size=12,
-                color="#111111",
-                family="Arial, sans-serif",
-            ),
-            hoverinfo="skip",
-            showlegend=False,
-            cliponaxis=False,
-            uid=f"stop-labels-{route_id}",
-        ))
+        for index, (_, stop_row) in enumerate(ordered.iterrows()):
+            label = display_texts[index]
+            if not label:
+                continue
+            xshift, yshift, xanchor, yanchor = next_label_position()
+            label_annotations.append(dict(
+                x=float(stop_row["stop_lon"]),
+                y=float(stop_row["stop_lat"]),
+                xref="x",
+                yref="y",
+                text=label,
+                showarrow=False,
+                xshift=xshift,
+                yshift=yshift,
+                xanchor=xanchor,
+                yanchor=yanchor,
+                align="center",
+                # soft white pill so the text stays readable over lines
+                bgcolor="rgba(255,255,255,0.72)",
+                bordercolor="rgba(0,0,0,0.08)",
+                borderwidth=1,
+                borderpad=2,
+                font=dict(size=11, color="#111111", family="Arial, sans-serif"),
+            ))
 
     fig.update_layout(
         title=dict(
@@ -692,9 +733,8 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         legend=dict(
             title="Routes",
             orientation="h",
-            bgcolor="rgba(255,255,255,0.9)",
-            bordercolor="rgba(0,0,0,0.15)",
-            borderwidth=1,
+            bgcolor="rgba(255,255,255,0)",
+            borderwidth=0,
             font=dict(color="#111111"),
             xref="paper",
             yref="paper",
@@ -713,7 +753,8 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         ),
         autosize=True,
         height=700,
-        margin=dict(t=100, b=150, l=160, r=160),
+        margin=dict(t=100, b=120, l=90, r=90),
+        annotations=label_annotations,
         hovermode="closest",
         dragmode="pan",
         uirevision=",".join(sorted(selected_routes)),
@@ -722,8 +763,10 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
     if map_lons and map_lats:
         lon_min, lon_max = min(map_lons), max(map_lons)
         lat_min, lat_max = min(map_lats), max(map_lats)
-        lon_padding = max((lon_max - lon_min) * 0.10, 0.003)
-        lat_padding = max((lat_max - lat_min) * 0.10, 0.003)
+        # generous padding so zoomed/panned states still have room for
+        # label text outside the point cloud before anything gets clipped
+        lon_padding = max((lon_max - lon_min) * 0.18, 0.006)
+        lat_padding = max((lat_max - lat_min) * 0.18, 0.006)
         fig.update_xaxes(range=[lon_min - lon_padding, lon_max + lon_padding])
         fig.update_yaxes(range=[lat_min - lat_padding, lat_max + lat_padding])
 
@@ -749,7 +792,7 @@ def hubs():
         )
     except:
         return pd.DataFrame(columns=["osm_latitude", "osm_longitude"])
-    
+
     # ================= COMMON STOPS =================
 @st.cache_data
 def common_stops(route_ids):
@@ -787,7 +830,7 @@ def common_stops(route_ids):
 @st.cache_data
 def route_durations():
     return pd.read_sql("""
-        SELECT 
+        SELECT
     t.route_id,
     t.trip_id,
     (
@@ -1268,7 +1311,277 @@ def scale_label_font_size(svg, scale_factor=1.5):
             scale_element(child)
 
     scale_element(root)
+
+    # ---- per-glyph tspan fix -----------------------------------------
+    # LOOM writes some labels as one <tspan> per glyph with explicit x/dx
+    # positions computed for the ORIGINAL font size, plus textLength/
+    # lengthAdjust pinning the run to the original width. Scaling only
+    # font-size makes the enlarged glyphs overlap / get squeezed into the
+    # old box, which reads as letters being chopped off.
+    text_tag = root.tag.split('}')[0] + '}text' if root.tag.startswith('{') else 'text'
+    tspan_tag = text_tag.rsplit('}', 1)[0] + '}tspan' if '}' in text_tag else 'tspan'
+
+    for text in root.iter(text_tag):
+        for attr in ('textLength', 'lengthAdjust'):
+            text.attrib.pop(attr, None)
+
+        tspans = text.findall(tspan_tag)
+        for tspan in tspans:
+            for attr in ('textLength', 'lengthAdjust'):
+                tspan.attrib.pop(attr, None)
+
+        try:
+            anchor_x = float(text.get('x')) if text.get('x') is not None else None
+        except (TypeError, ValueError):
+            anchor_x = None
+        if anchor_x is None:
+            for tspan in tspans:
+                if tspan.get('x') is not None:
+                    try:
+                        anchor_x = float(tspan.get('x'))
+                        break
+                    except (TypeError, ValueError):
+                        continue
+
+        for tspan in tspans:
+            x_val = tspan.get('x')
+            if x_val is not None and anchor_x is not None:
+                try:
+                    fx = float(x_val)
+                    tspan.set('x', f'{anchor_x + (fx - anchor_x) * scale_factor:g}')
+                except (TypeError, ValueError):
+                    pass
+            dx_val = tspan.get('dx')
+            if dx_val is not None:
+                try:
+                    tspan.set('dx', f'{float(dx_val) * scale_factor:g}')
+                except (TypeError, ValueError):
+                    pass
+            dy_val = tspan.get('dy')
+            if dy_val is not None:
+                try:
+                    tspan.set('dy', f'{float(dy_val) * scale_factor:g}')
+                except (TypeError, ValueError):
+                    pass
+
+    # ---- textPath label-path stretch fix ------------------------------
+    # LOOM draws station labels as <textPath> along tiny helper paths
+    # ("M x1 y1 L x2 y2") sized for the ORIGINAL font size. Per the SVG
+    # spec, glyphs that run past the end of the path are NOT rendered, so
+    # scaling the font without stretching the path makes the tail of every
+    # label disappear (e.g. "Swayambhu Bus Stop1" -> "Swayambh"). Stretch
+    # each label path by the same factor, anchored at the correct end so
+    # the label stays aligned with its station.
+    textpath_tag = text_tag.rsplit('}', 1)[0] + '}textPath' if '}' in text_tag else 'textPath'
+    xlink_href = '{http://www.w3.org/1999/xlink}href'
+
+    path_map = {}
+    for el in root.iter():
+        if el.tag.rsplit('}', 1)[-1] == 'path' and el.get('id'):
+            path_map[el.get('id')] = el
+
+    for text in root.iter(text_tag):
+        for tp in text.findall(textpath_tag):
+            href = tp.get(xlink_href) or tp.get('href')
+            if not href:
+                continue
+            path_el = path_map.get(href.split('#')[-1])
+            if path_el is None:
+                continue
+            d = path_el.get('d')
+            if not d:
+                continue
+            segs = re.findall(r'([A-Za-z])\s*(-?[\d.eE+]+)[\s,]+(-?[\d.eE+]+)', d)
+            if len(segs) < 2:
+                continue
+            pts = [(float(a), float(b)) for _, a, b in segs]
+            cmds = [s[0] for s in segs]
+
+            anchor = (tp.get('text-anchor') or text.get('text-anchor') or '').strip().lower()
+            offset = (tp.get('startOffset') or '').strip().lower()
+            if anchor == 'end' or offset in ('100%', 'end'):
+                ref = pts[-1]                      # keep station-side end fixed
+            elif anchor == 'middle' or offset == '50%':
+                ref = ((pts[0][0] + pts[-1][0]) / 2.0,
+                       (pts[0][1] + pts[-1][1]) / 2.0)  # grow both ways
+            else:
+                ref = pts[0]                       # keep start fixed
+
+            # 50% headroom: some of LOOM's original label paths are already
+            # tighter than the text they hold, so scale purely proportional
+            # stretching can still leave long labels clipped at the tail.
+            path_stretch = scale_factor * 1.5
+
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            if (max(xs) - min(xs)) >= (max(ys) - min(ys)):
+                # horizontal label: stretch x around ref, keep baselines
+                newd = ' '.join(
+                    f"{c} {ref[0] + (x - ref[0]) * path_stretch:.3f} {y:.3f}"
+                    for c, (x, y) in zip(cmds, pts)
+                )
+            else:
+                # vertical label: stretch y around ref
+                newd = ' '.join(
+                    f"{c} {x:.3f} {ref[1] + (y - ref[1]) * path_stretch:.3f}"
+                    for c, (x, y) in zip(cmds, pts)
+                )
+            path_el.set('d', newd)
+
     return ET.tostring(root, encoding="unicode")
+
+
+def remove_line_labels(svg):
+    """Remove the route-name labels LOOM paints along the lines
+    (<text class="line-label">, e.g. 'Kathmandu Ringroad via Balkot to ...')
+    plus the helper <path> elements they follow, so only station names
+    remain on the map."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    xlink_href = '{http://www.w3.org/1999/xlink}href'
+    used_path_ids = set()
+
+    removed = 0
+    for parent in root.iter():
+        for text in list(parent):
+            if text.tag.rsplit('}', 1)[-1] == 'text' and \
+                    'line-label' in (text.get('class') or ''):
+                for tp in text.iter():
+                    if tp.tag.rsplit('}', 1)[-1] == 'textPath':
+                        href = tp.get(xlink_href) or tp.get('href')
+                        if href:
+                            used_path_ids.add(href.split('#')[-1])
+                parent.remove(text)
+                removed += 1
+
+    if removed:
+        for parent in root.iter():
+            for path in list(parent):
+                if path.tag.rsplit('}', 1)[-1] == 'path' and \
+                        path.get('id') in used_path_ids:
+                    parent.remove(path)
+
+    return ET.tostring(root, encoding='unicode')
+
+
+def separate_station_labels(svg):
+    """Nudge station-name labels apart so they don't touch/overlap.
+
+    Estimates each label's bounding box from its (already stretched)
+    textPath geometry and font size, then deterministically stacks labels
+    below (or beside, for vertical labels) any already-placed label they
+    would overlap. One-directional pushing can't oscillate."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    xlink_href = '{http://www.w3.org/1999/xlink}href'
+
+    path_map = {}
+    for el in root.iter():
+        if el.tag.rsplit('}', 1)[-1] == 'path' and el.get('id'):
+            path_map[el.get('id')] = el
+
+    ns = root.tag.split('}')[0] if root.tag.startswith('{') else ''
+    text_tag = ns + '}text' if ns else 'text'
+    textpath_tag = ns + '}textPath' if ns else 'textPath'
+
+    labels = []
+    for text in root.iter(text_tag):
+        if 'station-label' not in (text.get('class') or ''):
+            continue
+        fs_match = re.search(r'([\d.]+)', text.get('font-size') or '')
+        if not fs_match:
+            continue
+        fs = float(fs_match.group(1))
+        for tp in text.findall(textpath_tag):
+            href = tp.get(xlink_href) or tp.get('href')
+            if not href:
+                continue
+            path_el = path_map.get(href.split('#')[-1])
+            if path_el is None:
+                continue
+            d = path_el.get('d') or ''
+            segs = re.findall(r'([A-Za-z])\s*(-?[\d.eE+]+)[\s,]+(-?[\d.eE+]+)', d)
+            if len(segs) < 2:
+                continue
+            pts = [(float(a), float(b)) for _, a, b in segs]
+            label_text = ''.join(text.itertext()).strip()
+            labels.append({
+                'path_el': path_el,
+                'pts': pts,
+                'cmds': [s[0] for s in segs],
+                'fs': fs,
+                'text': label_text,
+            })
+
+    def bbox(lb):
+        xs = [p[0] for p in lb['pts']]
+        ys = [p[1] for p in lb['pts']]
+        horiz = (max(xs) - min(xs)) >= (max(ys) - min(ys))
+        if horiz:
+            # baseline sits at y; box extends upward by ~1em. Use the full
+            # (stretched) path span as the box, since paths were sized to
+            # fit the text.
+            return min(xs), min(ys) - lb['fs'], max(xs), max(ys), True
+        return min(xs) - lb['fs'], min(ys), max(xs), max(ys), False
+
+    def shift(lb, horiz, delta):
+        pts = lb['pts']
+        if horiz:
+            newd = ' '.join(
+                f"{c} {x:.3f} {y + delta:.3f}"
+                for c, (x, y) in zip(lb['cmds'], pts)
+            )
+        else:
+            newd = ' '.join(
+                f"{c} {x + delta:.3f} {y:.3f}"
+                for c, (x, y) in zip(lb['cmds'], pts)
+            )
+        lb['path_el'].set('d', newd)
+        lb['pts'] = [(x + (0 if horiz else delta),
+                      y + (delta if horiz else 0)) for x, y in pts]
+
+    boxes = []
+    for lb in labels:
+        x0, y0, x1, y1, horiz = bbox(lb)
+        boxes.append({'lb': lb, 'x0': x0, 'y0': y0, 'x1': x1, 'y1': y1,
+                      'horiz': horiz})
+
+    # Deterministic placement: sort labels top-to-bottom (left-to-right
+    # for vertical ones) and stack each one BELOW any already-placed
+    # label it would overlap.
+    def overlaps(a, b):
+        return (a['x0'] < b['x1'] and b['x0'] < a['x1'] and
+                a['y0'] < b['y1'] and b['y0'] < a['y1'])
+
+    horiz_boxes = [bx for bx in boxes if bx['horiz']]
+    vert_boxes = [bx for bx in boxes if not bx['horiz']]
+
+    for group, axis in ((horiz_boxes, 'y'), (vert_boxes, 'x')):
+        group.sort(key=lambda bx: (bx['y0'] + bx['y1']) / 2 if axis == 'y'
+                   else (bx['x0'] + bx['x1']) / 2)
+        placed = []
+        for bx in group:
+            fs = bx['lb']['fs']
+            step = fs * 1.35
+            guard = 0
+            while any(overlaps(bx, p) for p in placed) and guard < 40:
+                shift(bx['lb'], bx['horiz'], step)
+                if axis == 'y':
+                    bx['y0'] += step
+                    bx['y1'] += step
+                else:
+                    bx['x0'] += step
+                    bx['x1'] += step
+                guard += 1
+            placed.append(bx)
+
+    return ET.tostring(root, encoding='unicode')
 
 
 def expand_label_clip_paths(svg, scale_factor=1.5):
@@ -1507,6 +1820,13 @@ def generate_loom_svg(
     if label_font_scale and label_font_scale != 1.0:
         svg = scale_label_font_size(svg, scale_factor=label_font_scale)
         svg = expand_label_clip_paths(svg, scale_factor=label_font_scale)
+        svg = bring_labels_to_front(svg)  # re-raise labels above enlarged glyphs/markers
+
+    # remove the route-name labels painted along the lines (user request:
+    # only station names should appear), then push any overlapping station
+    # labels apart so they don't touch each other
+    svg = remove_line_labels(svg)
+    svg = separate_station_labels(svg)
 
     # FIX (incomplete/clipped stop names on the LOOM map): transitmap sizes
     # the SVG canvas from line geometry only, so long station labels near
@@ -1919,7 +2239,7 @@ with st.container(border=True):
                     font-weight: 500;
                 }}
             </style>
-            
+
             <div class="hero-container">
                 <img src="data:image/png;base64,{img}" class="hero-img">
                 <div class="hero-title">KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</div>
@@ -1934,7 +2254,7 @@ with st.container(border=True):
                 <h1>KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</h1>
                 <p style="letter-spacing: 2px; opacity: 0.8;"> • KTM VALLEY  • GTFS FEED 2026</p>
             </div>
-            """, 
+            """,
             unsafe_allow_html=True
         )
 
@@ -1942,7 +2262,7 @@ with st.container(border=True):
 df_cong = fetch_congestion()
 df_dur = route_durations()
 df_agency = routes_per_agency()
-df_start = fetch_starting_stops() 
+df_start = fetch_starting_stops()
 kpi = fetch_kpi()
 
 longest = df_dur.loc[df_dur["duration"].idxmax()]
@@ -2038,7 +2358,7 @@ with st.container(border=True):
             <div class="kpi-sub up">↑ Most efficient</div>
         </div>
         """, unsafe_allow_html=True)
-        
+
 col_filter, col_map1, col_map2 = st.columns([1.5, 3, 1.5])
 
 # =========================================================
@@ -2176,7 +2496,7 @@ with col_map1:
                                 folium.PolyLine(coords,color="gray",weight=2,opacity=0.3
                                 ).add_to(route_layer)
 
-                                AntPath(locations=coords,color=color,weight=4,delay=800   
+                                AntPath(locations=coords,color=color,weight=4,delay=800
                                 ).add_to(route_layer)
 
                         route_layer.add_to(m1)
@@ -2200,12 +2520,12 @@ with col_map1:
                                 popup=folium.Popup(
                                     f"""
                                     <b>Stop Name:</b><br>{name}<br>
-                                    
+
                                     """,
                                     max_width=250
-                                    
+
                                 ),
-                                tooltip=name 
+                                tooltip=name
                             ).add_to(stops_layer)
 
                         stops_layer.add_to(m1)
@@ -2399,7 +2719,7 @@ with col_map1:
                         st.error("LOOM map generation failed.")
                         st.exception(error)
 
-                
+
 # =========================================================
 # CHART CONTAINER
 # =========================================================
@@ -2487,7 +2807,7 @@ with left_container:
     - Slow-moving transit lines
     - Operational efficiency issues
     """)
-                
+
             fig_pie = px.pie(
                 top5,
                 names="route_id",
@@ -2542,7 +2862,7 @@ with left_container:
             ].iloc[0]
 
             st.markdown(f"""
-            **Route ID:** {sel['route_id']}  
+            **Route ID:** {sel['route_id']}
             **Duration:** {sel['duration']:.1f} min
             """)
 
@@ -2575,10 +2895,10 @@ with left_container:
                     popup=folium.Popup(
                                 f"""
                                 <b>Stop Name:</b><br>{name}<br>
-                                
+
                                 """,
                                 max_width=250
-                                
+
                             ),
                             tooltip=name
                 ).add_to(m_preview)
@@ -2588,7 +2908,7 @@ with left_container:
     use_container_width=True,
     height=640
 )
-    
+
 # RIGHT COLUMN -> CONGESTION
 
 with right_container:
@@ -2599,7 +2919,7 @@ This line chart shows congestion index and average speed by hour.
 It helps to analyze:
 - Peak congestion hours
 - Correlation between speed and congestion
-                      
+
 The maximum congestion rate was **62.02**, observed at **10 AM**, while the minimum congestion rate was **18.13**, occurring after **8 PM**. The lowest average speed recorded was **0.00 km/h**, primarily during the early hours of the day between **1 AM and 5 AM**, whereas the highest average speed of **20.19 km/h** was observed during the morning period between **5 AM and 9 AM**. Overall, the congestion index and average speed exhibit an inverse relationship, where congestion levels increase during peak traffic hours while average vehicle speed decreases significantly during the same periods.
             """)
 
@@ -2637,7 +2957,7 @@ The maximum congestion rate was **62.02**, observed at **10 AM**, while the mini
     with st.container(border=True):
         with st.expander("Congestion by Time"):
             st.write("""This bar chart shows the average congestion index for different time blocks of the day.
-It helps to analyze:   
+It helps to analyze:
 - Congestion patterns during morning, midday, evening, and night
 - Identifying critical time periods for traffic management .
 
@@ -2663,7 +2983,7 @@ The highest congestion rate was observed during the midday period between 10 AM 
 
         fig1.update_layout(
             xaxis_title="Time Block",
-            yaxis_title="Congestion_Index", 
+            yaxis_title="Congestion_Index",
             height=300
         )
         st.plotly_chart(fig1, use_container_width=True)
