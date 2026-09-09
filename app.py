@@ -1137,8 +1137,39 @@ def create_filtered_gtfs(selected_routes_tuple):
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+def debug_loom_libraries():
+    import platform
+    import subprocess
+    import streamlit as st
+
+    st.write("### LOOM Dependency Debug")
+    st.write("OS:", platform.platform())
+    st.write("Python:", platform.python_version())
+
+    libraries = [
+        "libzip.so.4",
+        "libzip.so.5",
+        "libglpk.so.40",
+        "libCbc.so.3.1",
+        "libCbcSolver.so.3.1",
+        "libOsiClp.so.1",
+        "libCoinUtils.so.3",
+    ]
+
+    for lib in libraries:
+        result = subprocess.run(
+            ["bash", "-lc", f"find /usr /lib -name '{lib}' 2>/dev/null | head -20"],
+            capture_output=True,
+            text=True,
+        )
+
+        st.write(
+            f"{lib}:",
+            result.stdout.strip() or "NOT FOUND"
+        )
 
 def check_loom_installation():
+    debug_loom_libraries()
     binaries = ("gtfs2graph", "topo", "loom", "octi", "transitmap")
     if loom_uses_wsl():
         if shutil.which("wsl") is None:
