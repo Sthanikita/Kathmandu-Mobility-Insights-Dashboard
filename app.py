@@ -472,9 +472,6 @@ COLOR_EMOJI_MAP = {
 
 @st.cache_data
 def get_route_color_maps():
-    """Returns (name_map, hex_map): route_id -> color name, and
-    route_id -> hex value, assigned in a fixed, stable order over all
-    routes so the same route always gets the same color everywhere."""
     df = fetch_routes()
     name_map = {
         rid: ROUTE_COLOR_NAMES[i % len(ROUTE_COLOR_NAMES)]
@@ -531,8 +528,6 @@ def stops(route_id):
 # ================= ORDERED STOPS FOR TRANSIT MAP (NEW FEATURE) =================
 @st.cache_data
 def route_stops_ordered(route_id):
-    """Returns stops for a route IN SEQUENCE ORDER, using the trip with the
-    most stops as the representative pattern for that route."""
     engine = get_engine()
 
     trip_row = pd.read_sql(f"""
@@ -571,8 +566,6 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
     map_lats = []
     label_annotations = []
 
-    # 8-way compass cycle: two adjacent stops never get the same direction,
-    # so labels fan out around the route instead of stacking on it.
     LABEL_POSITIONS = [
         # (xshift, yshift, xanchor, yanchor)
         (0,   20, "center", "bottom"),   # top
@@ -779,8 +772,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
     if map_lons and map_lats:
         lon_min, lon_max = min(map_lons), max(map_lons)
         lat_min, lat_max = min(map_lats), max(map_lats)
-        # generous padding so zoomed/panned states still have room for
-        # label text outside the point cloud before anything gets clipped
+
         lon_padding = max((lon_max - lon_min) * 0.18, 0.006)
         lat_padding = max((lat_max - lat_min) * 0.18, 0.006)
         fig.update_xaxes(range=[lon_min - lon_padding, lon_max + lon_padding])
@@ -1003,10 +995,6 @@ def create_filtered_gtfs(selected_routes_tuple):
     if "service_id" not in trips_df or trips_df["service_id"].isna().any():
         raise ValueError("Selected trips contain a missing service_id.")
 
-    # Force route_color to match the exact colors used in the sidebar /
-    # Transit Map (ROUTE_COLOR_HEX), so the LOOM SVG map's line colors are
-    # the same as the colors the user selected, not whatever is (or isn't)
-    # in the raw GTFS feed's route_color column.
     _, route_hex_map = get_route_color_maps()
     routes_df["route_color"] = (
         routes_df["route_id"]
@@ -1214,20 +1202,11 @@ def check_loom_installation():
 
         if dependency_errors:
             raise RuntimeError(
-                "LOOM binary dependency check failed. Install the system "
-                "packages listed in packages.txt. If libzip.so.5 or the "
-                "requested COIN-OR SONAMEs remain unavailable after install, "
-                "rebuild the LOOM binaries in the deployment environment.\n\n" +
                 "\n\n".join(dependency_errors)
             )
 
 
 def get_octi_help():
-    """Run `octi -h` against your actual build so you can see the real flag
-    names it supports (e.g. cell/grid size, base grid type, penalties)
-    instead of guessing. Call this from the UI (Advanced expander) once,
-    read the printed flags, then use `octi_extra_args` to pass whichever
-    one controls grid/cell size."""
     check_loom_installation()
     loom_dir = shlex.quote(LOOM_DIR_WSL if loom_uses_wsl() else LOOM_DIR_NATIVE)
     return run_loom_command(f"{loom_dir}/octi -h 2>&1")
@@ -1239,38 +1218,9 @@ def get_transitmap_help():
     loom_dir = shlex.quote(LOOM_DIR_WSL if loom_uses_wsl() else LOOM_DIR_NATIVE)
     return run_loom_command(f"{loom_dir}/transitmap -h 2>&1")
 def raise_labels_above_markers(svg):
-    """Reorder each group's children so <text> elements (station-name
-    labels) always come AFTER non-text siblings (station markers, route
-    lines) in document order.
-
-    WHY THIS EXISTS: SVG paints elements in document order -- whatever
-    comes later in the markup is drawn on top. LOOM's `transitmap` output
-    apparently emits each station's label <text> BEFORE that station's
-    marker shape (the white pill/capsule outline) in some groups, so the
-    marker gets painted over the start of the label. That's what makes
-    names look truncated from the front, e.g. "Machhapokhari" rendering
-    as "achha Pokhari" -- the "M" (and sometimes the next letter) is
-    hidden under the marker, not actually missing from the data.
-
-    This function only reorders SIBLINGS within their existing parent
-    element -- it never moves a <text> node to a different parent -- so
-    any transform="..." on an ancestor <g> is preserved and coordinates
-    stay correct. It walks the whole tree, so nested groups are covered.
-
-    NOTE: this does not address stops with NO label at all. That looks
-    like LOOM's own automatic label-overlap avoidance choosing to drop a
-    conflicting label rather than draw overlapping text -- a layout
-    decision made inside LOOM itself, not a draw-order issue. If that
-    keeps happening, check `transitmap -h` (see get_transitmap_help()) for
-    a flag that controls label density/overlap tolerance, or try
-    increasing line_spacing so fewer stations end up close enough to
-    trigger the conflict in the first place.
-    """
     try:
         root = ET.fromstring(svg)
     except ET.ParseError:
-        # If LOOM's output isn't strict XML for some reason, skip this
-        # post-processing step rather than risk corrupting the SVG.
         return svg
 
     def tag_local(el):
@@ -1328,11 +1278,7 @@ def scale_label_font_size(svg, scale_factor=1.5):
     scale_element(root)
 
     # ---- per-glyph tspan fix -----------------------------------------
-    # LOOM writes some labels as one <tspan> per glyph with explicit x/dx
-    # positions computed for the ORIGINAL font size, plus textLength/
-    # lengthAdjust pinning the run to the original width. Scaling only
-    # font-size makes the enlarged glyphs overlap / get squeezed into the
-    # old box, which reads as letters being chopped off.
+
     text_tag = root.tag.split('}')[0] + '}text' if root.tag.startswith('{') else 'text'
     tspan_tag = text_tag.rsplit('}', 1)[0] + '}tspan' if '}' in text_tag else 'tspan'
 
@@ -1380,13 +1326,7 @@ def scale_label_font_size(svg, scale_factor=1.5):
                     pass
 
     # ---- textPath label-path stretch fix ------------------------------
-    # LOOM draws station labels as <textPath> along tiny helper paths
-    # ("M x1 y1 L x2 y2") sized for the ORIGINAL font size. Per the SVG
-    # spec, glyphs that run past the end of the path are NOT rendered, so
-    # scaling the font without stretching the path makes the tail of every
-    # label disappear (e.g. "Swayambhu Bus Stop1" -> "Swayambh"). Stretch
-    # each label path by the same factor, anchored at the correct end so
-    # the label stays aligned with its station.
+
     textpath_tag = text_tag.rsplit('}', 1)[0] + '}textPath' if '}' in text_tag else 'textPath'
     xlink_href = '{http://www.w3.org/1999/xlink}href'
 
@@ -1422,9 +1362,7 @@ def scale_label_font_size(svg, scale_factor=1.5):
             else:
                 ref = pts[0]                       # keep start fixed
 
-            # 50% headroom: some of LOOM's original label paths are already
-            # tighter than the text they hold, so scale purely proportional
-            # stretching can still leave long labels clipped at the tail.
+
             path_stretch = scale_factor * 1.5
 
             xs = [p[0] for p in pts]
@@ -1447,10 +1385,6 @@ def scale_label_font_size(svg, scale_factor=1.5):
 
 
 def remove_line_labels(svg):
-    """Remove the route-name labels LOOM paints along the lines
-    (<text class="line-label">, e.g. 'Kathmandu Ringroad via Balkot to ...')
-    plus the helper <path> elements they follow, so only station names
-    remain on the map."""
     try:
         root = ET.fromstring(svg)
     except ET.ParseError:
@@ -1483,12 +1417,6 @@ def remove_line_labels(svg):
 
 
 def separate_station_labels(svg):
-    """Nudge station-name labels apart so they don't touch/overlap.
-
-    Estimates each label's bounding box from its (already stretched)
-    textPath geometry and font size, then deterministically stacks labels
-    below (or beside, for vertical labels) any already-placed label they
-    would overlap. One-directional pushing can't oscillate."""
     try:
         root = ET.fromstring(svg)
     except ET.ParseError:
@@ -1539,9 +1467,6 @@ def separate_station_labels(svg):
         ys = [p[1] for p in lb['pts']]
         horiz = (max(xs) - min(xs)) >= (max(ys) - min(ys))
         if horiz:
-            # baseline sits at y; box extends upward by ~1em. Use the full
-            # (stretched) path span as the box, since paths were sized to
-            # fit the text.
             return min(xs), min(ys) - lb['fs'], max(xs), max(ys), True
         return min(xs) - lb['fs'], min(ys), max(xs), max(ys), False
 
@@ -1567,9 +1492,7 @@ def separate_station_labels(svg):
         boxes.append({'lb': lb, 'x0': x0, 'y0': y0, 'x1': x1, 'y1': y1,
                       'horiz': horiz})
 
-    # Deterministic placement: sort labels top-to-bottom (left-to-right
-    # for vertical ones) and stack each one BELOW any already-placed
-    # label it would overlap.
+
     def overlaps(a, b):
         return (a['x0'] < b['x1'] and b['x0'] < a['x1'] and
                 a['y0'] < b['y1'] and b['y0'] < a['y1'])
@@ -1600,7 +1523,6 @@ def separate_station_labels(svg):
 
 
 def expand_label_clip_paths(svg, scale_factor=1.5):
-    """Expand clip rectangles that constrain station labels."""
     try:
         root = ET.fromstring(svg)
     except ET.ParseError:
@@ -1659,7 +1581,6 @@ def expand_label_clip_paths(svg, scale_factor=1.5):
 
 
 def bring_labels_to_front(svg):
-    """Move all SVG text labels to the document's paint-order front."""
     try:
         root = ET.fromstring(svg)
     except ET.ParseError:
@@ -1723,24 +1644,7 @@ def bring_labels_to_front(svg):
 
 
 def pad_svg_viewbox(svg, pad=150):
-    """Expand an SVG's viewBox (and its width/height attributes) by `pad`
-    pixels on every side.
 
-    WHY THIS EXISTS: LOOM's `transitmap` binary sizes the SVG canvas from
-    the route-line geometry, not from how wide the station-name text is.
-    Station labels are real <text> elements that can sit partway (or
-    fully) outside that geometric bounding box. Anything downstream that
-    embeds this SVG into a fixed-size viewport -- our own <image> tag in
-    build_composite_svg(), a bare <img> tag, or a browser rendering the
-    raw SVG file directly -- will hard-clip at the declared width/height,
-    which is what makes station names look cut off/incomplete on the LOOM
-    map specifically (the Plotly "Transit Map" view is unaffected, since
-    it lays out its own text with `cliponaxis=False` and axis autorange).
-
-    Padding the viewBox out (while also enlarging width/height so the
-    aspect ratio and coordinate system stay consistent) gives the label
-    text room to sit inside the canvas instead of right at its edge.
-    """
     vb_match = re.search(
         r'viewBox="([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)"', svg
     )
@@ -1780,8 +1684,6 @@ def pad_svg_viewbox(svg, pad=150):
 
 
 @st.cache_data(show_spinner=False)
-
-
 def generate_loom_svg(
     selected_routes_tuple,
     schematic=True,
@@ -1799,13 +1701,8 @@ def generate_loom_svg(
 
     octi_cmd = f"{loom_dir}/octi"
     if octi_extra_args and octi_extra_args.strip():
-        # extra flags discovered via `octi -h` (see get_octi_help), e.g. a
-        # cell/grid-size flag, so the octilinear map doesn't over-distort
-        # long, sparse routes into exaggerated zig-zags
         octi_cmd += f" {octi_extra_args.strip()}"
 
-    # transitmap's own flags for thicker, more spaced-out lines (route
-    # colors themselves come from routes.txt route_color / route_color_map)
     transitmap_cmd = (
         f"{loom_dir}/transitmap -l "
         f"--line-width {line_width} --line-spacing {line_spacing}"
@@ -1824,11 +1721,6 @@ def generate_loom_svg(
             f"LOOM did not return a valid SVG.\n\nOutput:\n{svg[:2000]}"
         )
 
-    # FIX (letters hidden under station markers, e.g. "Machhapokhari"
-    # rendering as "achha Pokhari"): reorder siblings so text always
-    # paints on top of markers/lines. Must run BEFORE pad_svg_viewbox,
-    # since that only touches the outer viewBox/width/height, not
-    # element order.
     svg = raise_labels_above_markers(svg)
     svg = bring_labels_to_front(svg)
 
@@ -1837,17 +1729,9 @@ def generate_loom_svg(
         svg = expand_label_clip_paths(svg, scale_factor=label_font_scale)
         svg = bring_labels_to_front(svg)  # re-raise labels above enlarged glyphs/markers
 
-    # remove the route-name labels painted along the lines (user request:
-    # only station names should appear), then push any overlapping station
-    # labels apart so they don't touch each other
     svg = remove_line_labels(svg)
     svg = separate_station_labels(svg)
 
-    # FIX (incomplete/clipped stop names on the LOOM map): transitmap sizes
-    # the SVG canvas from line geometry only, so long station labels near
-    # the edges can sit outside the declared width/height and get clipped
-    # once this SVG is embedded downstream. Pad the canvas out here, right
-    # at the source, before anything else touches it.
     if label_pad and label_pad > 0:
         svg = pad_svg_viewbox(svg, pad=label_pad)
 
@@ -1865,41 +1749,12 @@ def build_composite_svg(
     route_agency_map=None,
     title_text="Transit Map of Kathmandu Valley"
 ):
-    """Builds a single, self-contained SVG that embeds the raw LOOM SVG
-    output plus a real title and legend drawn as native SVG elements.
 
-    This exists because the raw LOOM output (from `generate_loom_svg`) is
-    just the map itself -- the title header and legend box shown on screen
-    are separate HTML <div>s layered around the <img>, not part of the SVG
-    data. Downloading the <img> source alone (the old behaviour) therefore
-    always produced a file with no title/legend. Wrapping everything into
-    one composite SVG here means the downloaded .svg (and, via rasterizing
-    this composite, the .png) actually contains the title and legend.
-
-    NOTE: `svg` arriving here has already been through pad_svg_viewbox()
-    inside generate_loom_svg(), so the width/height parsed below already
-    include the label padding -- station names that used to run past the
-    old (unpadded) canvas edge now have room inside it instead of being
-    clipped by the <image> element below.
-    """
     w_match = re.search(r'width="([\d.]+)', svg)
     h_match = re.search(r'height="([\d.]+)', svg)
     w = float(w_match.group(1)) if w_match else 1200.0
     h = float(h_match.group(1)) if h_match else 800.0
 
-    # Layout constants (all in px, laid out top-to-bottom):
-    #   header_h        -- title-only banner above the map (subtitle removed
-    #                       per request, so this no longer needs room for it)
-    #   legend_header_h -- gap below the map before the "Routes" label,
-    #                       plus room for the label itself
-    #   legend_row_h    -- vertical spacing PER legend row
-    #   legend_bottom_pad -- breathing room after the last legend row
-    #
-    # NOTE (fix): the previous version placed the "Routes" label and the
-    # first legend row only ~4px apart (they were computed from nearly the
-    # same y-offset), so they rendered on top of one another. Spacing is
-    # now generous and each element has its own dedicated offset so rows
-    # can never collide with the header or each other.
     header_h = 55
     legend_header_h = 50
     legend_row_h = 26
@@ -2702,7 +2557,7 @@ with col_map1:
                     )
                     loom_label_font_scale = st.slider(
                         "Label font size x",
-                        min_value=0.5, max_value=3.0, value=1.0, step=0.1,
+                        min_value=0.5, max_value=3.0, value=2.0, step=0.1,
                         key="loom_label_font_scale",
                         help="Multiplies the font size in LOOM station labels.",
                     )
@@ -2881,7 +2736,10 @@ with left_container:
             **Duration:** {sel['duration']:.1f} min
             """)
 
-            m_preview = folium.Map(location=[27.7, 85.3],zoom_start=12,tiles="CartoDB positron")
+            m_preview = folium.Map(location=[27.7, 85.3], zoom_start=12, tiles=None)
+            # OpenStreetMap doesn't need an API key (CartoDB now returns a
+            # 'API key required' error image without one)
+            folium.TileLayer("OpenStreetMap", name="OpenStreetMap", show=True).add_to(m_preview)
             geom = route_geom(selected_route_id)
 
             for _, row in geom.iterrows():
