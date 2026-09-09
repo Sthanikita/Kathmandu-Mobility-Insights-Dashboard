@@ -550,33 +550,47 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
 
     any_data = False
     labeled_stops = set()
-    label_points = []
     map_lons = []
     map_lats = []
-    label_annotations = []
 
-    # 8-way compass cycle: two adjacent stops never get the same direction,
-    # so labels fan out around the route instead of stacking on it.
-    LABEL_POSITIONS = [
-        # (xshift, yshift, xanchor, yanchor)
-        (0,   20, "center", "bottom"),   # top
-        (0,  -20, "center", "top"),      # bottom
-        (-18, 0,  "right",  "middle"),   # left
-        (18,  0,  "left",   "middle"),   # right
-        (-14, 16, "right",  "bottom"),   # top-left
-        (14,  16, "left",   "bottom"),   # top-right
-        (-14,-16, "right",  "top"),      # bottom-left
-        (14, -16, "left",   "top"),      # bottom-right
-    ]
-    label_cycle = 0
+    def choose_textpositions(ordered):
+        """Pick a label side per stop so text sits beside the line,
+        not on top of it. The label goes to the LEFT of the direction
+        of travel, falling back to the right for the first/last stop."""
+        lons = pd.to_numeric(ordered["stop_lon"], errors="coerce").tolist()
+        lats = pd.to_numeric(ordered["stop_lat"], errors="coerce").tolist()
+        n = len(lons)
+        positions = []
+        for i in range(n):
+            dx = dy = 0.0
+            if i < n - 1:
+                dx = lons[i + 1] - lons[i]
+                dy = lats[i + 1] - lats[i]
+            if i > 0:
+                px = lons[i] - lons[i - 1]
+                py = lats[i] - lats[i - 1]
+                if dx == 0 and dy == 0:
+                    dx, dy = px, py
+                else:
+                    dx, dy = (dx + px) / 2.0, (dy + py) / 2.0
+            # make degrees roughly metric so direction angles are meaningful
+            dx *= math.cos(math.radians(lats[i] if not pd.isna(lats[i]) else 27.7))
+            if dx == 0 and dy == 0:
+                positions.append("top center")
+                continue
+            # left of travel direction = heading rotated +90 degrees
+            a = (math.degrees(math.atan2(dy, dx)) + 90.0) % 360.0
+            if 45 <= a < 135:
+                positions.append("top center")
+            elif 135 <= a < 225:
+                positions.append("middle left")
+            elif 225 <= a < 315:
+                positions.append("bottom center")
+            else:
+                positions.append("middle right")
+        return positions
 
-    def next_label_position():
-        nonlocal label_cycle
-        position = LABEL_POSITIONS[label_cycle % len(LABEL_POSITIONS)]
-        label_cycle += 1
-        return position
-
-    def format_stop_name(stop_name, max_chars=16):
+    def format_stop_name(stop_name, max_chars=20):
         """Wrap stop names without removing any characters."""
         if pd.isna(stop_name):
             return ""
@@ -658,24 +672,15 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         display_texts = []
         for _, stop_row in ordered.iterrows():
             stop_name = "" if pd.isna(stop_row["stop_name"]) else str(stop_row["stop_name"]).strip()
-            stop_lat = float(stop_row["stop_lat"])
-            stop_lon = float(stop_row["stop_lon"])
             stop_key = (
                 stop_name.casefold(),
-                round(stop_lat, 6),
-                round(stop_lon, 6),
+                round(float(stop_row["stop_lat"]), 6),
+                round(float(stop_row["stop_lon"]), 6),
             )
-            is_near_existing_label = any(
-                abs(stop_lat - label_lat) < 0.0015
-                and abs(stop_lon - label_lon) < 0.0015
-                for label_lat, label_lon in label_points
+            display_texts.append(
+                format_stop_name(stop_name) if stop_key not in labeled_stops else ""
             )
-            if stop_key in labeled_stops or is_near_existing_label:
-                display_texts.append("")
-            else:
-                display_texts.append(format_stop_name(stop_name))
-                labeled_stops.add(stop_key)
-                label_points.append((stop_lat, stop_lon))
+            labeled_stops.add(stop_key)
 
         fig.add_trace(go.Scatter(
             x=ordered["stop_lon"],
@@ -694,30 +699,22 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             uid=f"stops-{route_id}",
         ))
 
-        for index, (_, stop_row) in enumerate(ordered.iterrows()):
-            label = display_texts[index]
-            if not label:
-                continue
-            xshift, yshift, xanchor, yanchor = next_label_position()
-            label_annotations.append(dict(
-                x=float(stop_row["stop_lon"]),
-                y=float(stop_row["stop_lat"]),
-                xref="x",
-                yref="y",
-                text=label,
-                showarrow=False,
-                xshift=xshift,
-                yshift=yshift,
-                xanchor=xanchor,
-                yanchor=yanchor,
-                align="center",
-                # soft white pill so the text stays readable over lines
-                bgcolor="rgba(255,255,255,0.72)",
-                bordercolor="rgba(0,0,0,0.08)",
-                borderwidth=1,
-                borderpad=2,
-                font=dict(size=11, color="#111111", family="Arial, sans-serif"),
-            ))
+        fig.add_trace(go.Scatter(
+            x=ordered["stop_lon"],
+            y=ordered["stop_lat"],
+            mode="text",
+            text=display_texts,
+            textposition=choose_textpositions(ordered),
+            textfont=dict(
+                size=12,
+                color="#111111",
+                family="Arial, sans-serif",
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+            cliponaxis=False,
+            uid=f"stop-labels-{route_id}",
+        ))
 
     fig.update_layout(
         title=dict(
@@ -733,8 +730,9 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         legend=dict(
             title="Routes",
             orientation="h",
-            bgcolor="rgba(255,255,255,0)",
-            borderwidth=0,
+            bgcolor="rgba(255,255,255,0.9)",
+            bordercolor="rgba(0,0,0,0.15)",
+            borderwidth=1,
             font=dict(color="#111111"),
             xref="paper",
             yref="paper",
@@ -753,8 +751,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         ),
         autosize=True,
         height=700,
-        margin=dict(t=100, b=120, l=90, r=90),
-        annotations=label_annotations,
+        margin=dict(t=100, b=150, l=160, r=160),
         hovermode="closest",
         dragmode="pan",
         uirevision=",".join(sorted(selected_routes)),
