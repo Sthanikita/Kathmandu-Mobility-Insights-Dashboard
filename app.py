@@ -23,6 +23,22 @@ import xml.etree.ElementTree as ET
 st.set_page_config(layout="wide")
 
 pio.templates.default = "plotly_dark"
+
+# -------------------------------------------------------------------
+# LOOM bundled native libraries
+# -------------------------------------------------------------------
+LOOM_LIB_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "loom-libs",
+)
+
+if os.path.isdir(LOOM_LIB_DIR):
+    os.environ["LD_LIBRARY_PATH"] = (
+        LOOM_LIB_DIR
+        + os.pathsep
+        + os.environ.get("LD_LIBRARY_PATH", "")
+    )
+
 # ================= STYLE FIX =================
 st.markdown("""
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
