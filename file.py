@@ -23,6 +23,22 @@ import xml.etree.ElementTree as ET
 st.set_page_config(layout="wide")
 
 pio.templates.default = "plotly_dark"
+
+# -------------------------------------------------------------------
+# LOOM bundled native libraries
+# -------------------------------------------------------------------
+LOOM_LIB_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "loom-libs",
+)
+
+if os.path.isdir(LOOM_LIB_DIR):
+    os.environ["LD_LIBRARY_PATH"] = (
+        LOOM_LIB_DIR
+        + os.pathsep
+        + os.environ.get("LD_LIBRARY_PATH", "")
+    )
+
 # ================= STYLE FIX =================
 st.markdown("""
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -453,12 +469,22 @@ COLOR_EMOJI_MAP = {
     "grey": "◼️",
 }
 
+MAJOR_TRANSIT_STOPS = {
+    "kalanki", "chabahil", "koteshwor", "balkhu",
+}
+
+
+def is_major_transit_stop(stop_name):
+    """Match numbered or extended GTFS names to a major exchange."""
+    normalized = re.sub(r"[\s_-]*\d+\s*$", "", str(stop_name).strip().casefold())
+    return any(
+        normalized == major or normalized.startswith(major + " ")
+        for major in MAJOR_TRANSIT_STOPS
+    )
+
 
 @st.cache_data
 def get_route_color_maps():
-    """Returns (name_map, hex_map): route_id -> color name, and
-    route_id -> hex value, assigned in a fixed, stable order over all
-    routes so the same route always gets the same color everywhere."""
     df = fetch_routes()
     name_map = {
         rid: ROUTE_COLOR_NAMES[i % len(ROUTE_COLOR_NAMES)]
@@ -515,8 +541,6 @@ def stops(route_id):
 # ================= ORDERED STOPS FOR TRANSIT MAP (NEW FEATURE) =================
 @st.cache_data
 def route_stops_ordered(route_id):
-    """Returns stops for a route IN SEQUENCE ORDER, using the trip with the
-    most stops as the representative pattern for that route."""
     engine = get_engine()
 
     trip_row = pd.read_sql(f"""
@@ -543,180 +567,557 @@ def route_stops_ordered(route_id):
     """, engine)
 
 
+def _offset_polyline(lons, lats, offset_deg):
+    """Shift a polyline sideways by offset_deg (in lon/lat degrees), using
+    the local perpendicular ('normal') direction at each vertex so the
+    offset copy stays roughly parallel to the original. Used to fan out
+    routes that share the same corridor instead of drawing exactly on top
+    of one another."""
+    n = len(lons)
+    if n < 2 or not offset_deg:
+        return list(lons), list(lats)
+
+    new_lons, new_lats = [0.0] * n, [0.0] * n
+    for i in range(n):
+        if i == 0:
+            dx, dy = lons[1] - lons[0], lats[1] - lats[0]
+        elif i == n - 1:
+            dx, dy = lons[-1] - lons[-2], lats[-1] - lats[-2]
+        else:
+            dx, dy = lons[i + 1] - lons[i - 1], lats[i + 1] - lats[i - 1]
+        length = math.hypot(dx, dy) or 1e-9
+        nx, ny = -dy / length, dx / length  # unit normal
+        new_lons[i] = lons[i] + nx * offset_deg
+        new_lats[i] = lats[i] + ny * offset_deg
+    return new_lons, new_lats
+
+
+def _octilinear_path(lons, lats):
+    """Build horizontal, vertical, and diagonal legs between stop nodes."""
+    if len(lons) < 2:
+        return list(lons), list(lats)
+    path_lons, path_lats = [lons[0]], [lats[0]]
+    for index in range(1, len(lons)):
+        start_lon, start_lat = lons[index - 1], lats[index - 1]
+        end_lon, end_lat = lons[index], lats[index]
+        dx, dy = end_lon - start_lon, end_lat - start_lat
+        if not dx or not dy:
+            path_lons.append(end_lon)
+            path_lats.append(end_lat)
+            continue
+        diagonal = min(abs(dx), abs(dy))
+        diagonal_lon = start_lon + math.copysign(diagonal, dx)
+        diagonal_lat = start_lat + math.copysign(diagonal, dy)
+        path_lons.append(diagonal_lon)
+        path_lats.append(diagonal_lat)
+        if diagonal_lon != end_lon:
+            path_lons.append(end_lon)
+            path_lats.append(diagonal_lat)
+        elif diagonal_lat != end_lat:
+            path_lons.append(diagonal_lon)
+            path_lats.append(end_lat)
+    return path_lons, path_lats
+
+
 def build_transit_map(selected_routes, route_color_map, route_name_map,
-                       route_agency_map=None,
-                       title_text="Transit Map of Kathmandu Valley"):
+                      route_agency_map=None,
+                      title_text="Transit Map of Kathmandu Valley",
+                      separate_overlapping_routes=True,
+                      route_spacing=1.0,
+                      label_density="Major exchanges only",
+                      show_stop_markers=True,
+                      schematic=False,
+                      hidden_label_names=()):
+    """Build a clean schematic transit map.
+
+    Improvements:
+      * station names are plain text (no boxes/pills)
+      * labels are placed diagonally/sideways with a small leader line
+      * stops shared by multiple selected routes get ONE common oval marker
+      * each route is visually connected to the common stop with a dotted line
+      * route lines can still be fanned apart for busy corridors
+      * generous canvas/margins make the map less congested on wide screens
+    """
     fig = go.Figure()
 
-    any_data = False
-    labeled_stops = set()
-    map_lons = []
-    map_lats = []
+    route_data = {}
+    map_lons, map_lats = [], []
+    stop_routes = {}
 
-    def choose_textpositions(ordered):
-        """Pick a label side per stop so text sits beside the line,
-        not on top of it. The label goes to the LEFT of the direction
-        of travel, falling back to the right for the first/last stop."""
-        lons = pd.to_numeric(ordered["stop_lon"], errors="coerce").tolist()
-        lats = pd.to_numeric(ordered["stop_lat"], errors="coerce").tolist()
-        n = len(lons)
-        positions = []
-        for i in range(n):
-            dx = dy = 0.0
-            if i < n - 1:
-                dx = lons[i + 1] - lons[i]
-                dy = lats[i + 1] - lats[i]
-            if i > 0:
-                px = lons[i] - lons[i - 1]
-                py = lats[i] - lats[i - 1]
-                if dx == 0 and dy == 0:
-                    dx, dy = px, py
-                else:
-                    dx, dy = (dx + px) / 2.0, (dy + py) / 2.0
-            # make degrees roughly metric so direction angles are meaningful
-            dx *= math.cos(math.radians(lats[i] if not pd.isna(lats[i]) else 27.7))
-            if dx == 0 and dy == 0:
-                positions.append("top center")
-                continue
-            # left of travel direction = heading rotated +90 degrees
-            a = (math.degrees(math.atan2(dy, dx)) + 90.0) % 360.0
-            if 45 <= a < 135:
-                positions.append("top center")
-            elif 135 <= a < 225:
-                positions.append("middle left")
-            elif 225 <= a < 315:
-                positions.append("bottom center")
-            else:
-                positions.append("middle right")
-        return positions
-
-    def format_stop_name(stop_name, max_chars=20):
-        """Wrap stop names without removing any characters."""
-        if pd.isna(stop_name):
-            return ""
-
-        stop_name = str(stop_name).strip()
-        if not stop_name:
-            return ""
-
-        words = stop_name.split()
-        lines = []
-        current_line = ""
-
-        for word in words:
-            if len(word) > max_chars:
-                if current_line:
-                    lines.append(current_line)
-                    current_line = ""
-                lines.append(word)
-                continue
-
-            if not current_line:
-                current_line = word
-                continue
-
-            proposed_line = current_line + " " + word
-            if len(proposed_line) <= max_chars:
-                current_line = proposed_line
-            else:
-                lines.append(current_line)
-                current_line = word
-
-        if current_line:
-            lines.append(current_line)
-
-        return "<br>".join(lines)
-
+    # ------------------------------------------------------------
+    # LOAD ROUTE STOP SEQUENCES ONCE
+    # ------------------------------------------------------------
     for route_id in selected_routes:
         ordered = route_stops_ordered(route_id)
         if ordered.empty:
             continue
+        ordered = ordered.copy()
+        ordered["stop_lat"] = pd.to_numeric(ordered["stop_lat"], errors="coerce")
+        ordered["stop_lon"] = pd.to_numeric(ordered["stop_lon"], errors="coerce")
+        ordered = ordered.dropna(subset=["stop_lat", "stop_lon"])
+        if ordered.empty:
+            continue
 
-        any_data = True
-        map_lons.extend(pd.to_numeric(ordered["stop_lon"], errors="coerce").dropna().tolist())
-        map_lats.extend(pd.to_numeric(ordered["stop_lat"], errors="coerce").dropna().tolist())
+        route_data[route_id] = ordered
+        map_lons.extend(ordered["stop_lon"].tolist())
+        map_lats.extend(ordered["stop_lat"].tolist())
+
+        for _, row in ordered.iterrows():
+            name = "" if pd.isna(row["stop_name"]) else str(row["stop_name"]).strip()
+            key = (
+                name.casefold(),
+                round(float(row["stop_lat"]), 6),
+                round(float(row["stop_lon"]), 6),
+            )
+            stop_routes.setdefault(key, []).append(route_id)
+
+    if not route_data:
+        fig.add_annotation(
+            text="No stop-sequence data found for the selected route(s).",
+            showarrow=False,
+            font=dict(size=16, color="#666666"),
+            xref="paper", yref="paper", x=0.5, y=0.5,
+        )
+        return fig
+
+    # Keep route IDs unique for shared-stop counting.
+    for key in stop_routes:
+        stop_routes[key] = list(dict.fromkeys(stop_routes[key]))
+
+    shared_stops = {k for k, routes in stop_routes.items() if len(routes) > 1}
+
+    bbox_diag = math.hypot(
+        max(map_lons) - min(map_lons),
+        max(map_lats) - min(map_lats),
+    )
+    bbox_diag = max(bbox_diag, 0.01)
+
+    # These are deliberately modest so the route remains recognizable while
+    # overlapping lines become readable.
+    route_offset_unit = bbox_diag * 0.010 * route_spacing
+
+    def format_stop_name(stop_name, max_chars=20):
+        if pd.isna(stop_name):
+            return ""
+        text = str(stop_name).strip()
+        if not text:
+            return ""
+        words = text.split()
+        lines, current = [], ""
+        for word in words:
+            if len(word) > max_chars:
+                if current:
+                    lines.append(current)
+                    current = ""
+                lines.append(word)
+            elif not current:
+                current = word
+            elif len(current) + 1 + len(word) <= max_chars:
+                current += " " + word
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        return "<br>".join(lines)
+
+    def stop_label_name(stop_name):
+        """Treat numbered variants such as 'Gaushala 1' and 'Gaushala 2'
+        as one nearby label while preserving the original stop markers."""
+        text = "" if pd.isna(stop_name) else str(stop_name).strip()
+        return re.sub(r"\s+\d+\s*$", "", text).strip() or text
+
+    hidden_label_keys = {
+        str(name).strip().casefold()
+        for name in hidden_label_names
+        if str(name).strip()
+    }
+
+    def stop_distance_m(lat1, lon1, lat2, lon2):
+        lat_mid = math.radians((lat1 + lat2) / 2.0)
+        return math.hypot(
+            (lat2 - lat1) * 111320.0,
+            (lon2 - lon1) * 111320.0 * math.cos(lat_mid),
+        )
+
+    def label_width_chars(label):
+        return max((len(line) for line in label.split("<br>")), default=0)
+
+    label_boxes = []
+    plot_width_px = 760
+    plot_height_px = 650
+    label_lon_min, label_lon_max = min(map_lons), max(map_lons)
+    label_lat_min, label_lat_max = min(map_lats), max(map_lats)
+
+    def label_box(label, x, y, xshift, yshift, xanchor, yanchor):
+        """Estimate an annotation's screen-space box before drawing it."""
+        x_range = max(label_lon_max - label_lon_min, 1e-9)
+        y_range = max(label_lat_max - label_lat_min, 1e-9)
+        anchor_x = (x - label_lon_min) / x_range * plot_width_px + xshift
+        anchor_y = (label_lat_max - y) / y_range * plot_height_px - yshift
+        width = max(label_width_chars(label) * 8.0, 30) + 10
+        height = max(len(label.split("<br>")) * 14.0, 14) + 8
+
+        if xanchor == "right":
+            left = anchor_x - width
+        elif xanchor == "center":
+            left = anchor_x - width / 2
+        else:
+            left = anchor_x
+
+        if yanchor == "top":
+            top = anchor_y
+        elif yanchor == "middle":
+            top = anchor_y - height / 2
+        else:
+            top = anchor_y - height
+        return left, top, left + width, top + height
+
+    def choose_label_position(label, x, y):
+        """Choose the first offset whose text box does not touch another."""
+        nonlocal label_counter
+        for attempt in range(len(label_positions)):
+            position_index = (label_counter + attempt) % len(label_positions)
+            xshift, yshift, xanchor, yanchor = label_positions[position_index]
+            candidate = label_box(
+                label, x, y, xshift, -yshift, xanchor, yanchor
+            )
+            padded = (
+                candidate[0] - 8, candidate[1] - 6,
+                candidate[2] + 8, candidate[3] + 6,
+            )
+            if not any(
+                padded[0] < box[2] and box[0] < padded[2]
+                and padded[1] < box[3] and box[1] < padded[3]
+                for box in label_boxes
+            ):
+                label_counter = position_index + 1
+                label_boxes.append(padded)
+                return xshift, yshift, xanchor, yanchor
+        return None
+
+    # ------------------------------------------------------------
+    # LABEL POSITIONS
+    # Diagonal/side positions are rotated through the network.  Labels are
+    # plain text and use a thin leader line rather than a white box.
+    # ------------------------------------------------------------
+    # SIDE placements only: every candidate has a substantial horizontal
+    # offset so the leader line always goes left or right of the stop,
+    # never straight up/down across the route lines (vertical leaders were
+    # criss-crossing and attaching names to the wrong stop).
+    label_positions = [
+        # PURELY HORIZONTAL leaders only: yshift = 0 so the leader line goes
+        # straight left or straight right of the stop. Two horizontal leaders
+        # can never cross each other (the Jaybageshwori / Gaushala issue).
+        (24, 0, "left", "middle"),
+        (-24, 0, "right", "middle"),
+        (38, 0, "left", "middle"),
+        (-38, 0, "right", "middle"),
+    ]
+    label_counter = 0
+
+    def next_label_position():
+        nonlocal label_counter
+        pos = label_positions[label_counter % len(label_positions)]
+        label_counter += 1
+        return pos
+
+    # Track label locations only for ordinary stops. Shared stops always get
+    # one label at their common/original coordinate.
+    ordinary_label_points = []
+    numbered_label_points = {}
+    seen_base_names = set()  # one label per base name (e.g. 'Kalanki'
+
+    # ------------------------------------------------------------
+    # DRAW ROUTES
+    # ------------------------------------------------------------
+    n_routes = max(len(route_data), 1)
+    draw_cache = {}
+
+    for route_index, (route_id, ordered) in enumerate(route_data.items()):
         base_color = route_color_map.get(route_id, "blue")
         color = ROUTE_COLOR_HEX.get(base_color, base_color)
         route_label = route_name_map.get(route_id, route_id)
         agency_label = (route_agency_map or {}).get(route_id, "Unknown Agency")
         agency_group = f"agency-{agency_label}"
-        first_agency_route = not any(
-            trace.legendgroup == agency_group for trace in fig.data
-        )
 
+        first_agency_route = not any(
+            getattr(trace, "legendgroup", None) == agency_group for trace in fig.data
+        )
         if first_agency_route:
             fig.add_trace(go.Scatter(
-                x=[None],
-                y=[None],
+                x=[None], y=[None],
                 mode="markers",
                 marker=dict(size=1, color="rgba(0,0,0,0)"),
                 name=f"<b>{html.escape(str(agency_label))}</b>",
                 legendgroup=agency_group,
                 hoverinfo="skip",
-                uid=f"agency-{agency_label}",
+                uid=f"agency-{route_id}",
             ))
 
-        # route line connecting stops in sequence
+        lons = ordered["stop_lon"].tolist()
+        lats = ordered["stop_lat"].tolist()
+
+        if separate_overlapping_routes and n_routes > 1:
+            offset_deg = route_offset_unit * (
+                route_index - (n_routes - 1) / 2.0
+            )
+            draw_lons, draw_lats = _offset_polyline(lons, lats, offset_deg)
+        else:
+            draw_lons, draw_lats = lons, lats
+
+        draw_cache[route_id] = (draw_lons, draw_lats)
+
+        line_lons, line_lats = draw_lons, draw_lats
+        if schematic:
+            line_lons, line_lats = _octilinear_path(draw_lons, draw_lats)
+
+        # Route line.
         fig.add_trace(go.Scatter(
-            x=ordered["stop_lon"],
-            y=ordered["stop_lat"],
+            x=line_lons,
+            y=line_lats,
             mode="lines",
-            line=dict(color=color, width=8),  # thicker line (was 4)
+            line=dict(color=color, width=5.5),
             name=route_label,
             hoverinfo="skip",
             legendgroup=agency_group,
             uid=f"line-{route_id}",
-            cliponaxis=False,  # don't hard-clip the line right at the axis edge
+            cliponaxis=False,
         ))
 
-        display_texts = []
-        for _, stop_row in ordered.iterrows():
-            stop_name = "" if pd.isna(stop_row["stop_name"]) else str(stop_row["stop_name"]).strip()
-            stop_key = (
-                stop_name.casefold(),
-                round(float(stop_row["stop_lat"]), 6),
-                round(float(stop_row["stop_lon"]), 6),
-            )
-            display_texts.append(
-                format_stop_name(stop_name) if stop_key not in labeled_stops else ""
-            )
-            labeled_stops.add(stop_key)
-
+        # Stop markers remain on the route copy. Shared-stop connectors are
+        # added below, so the common oval visually becomes the interchange.
+        marker_size = 7 if show_stop_markers else 9
+        marker_color = "white" if show_stop_markers else "rgba(0,0,0,0)"
+        marker_line_width = 2.2 if show_stop_markers else 0
         fig.add_trace(go.Scatter(
-            x=ordered["stop_lon"],
-            y=ordered["stop_lat"],
+            x=draw_lons,
+            y=draw_lats,
             mode="markers",
             marker=dict(
-                size=9,
-                color="white",
-                line=dict(color=color, width=3),
+                size=marker_size,
+                color=marker_color,
+                line=dict(color=color, width=marker_line_width),
             ),
             hovertext=ordered["stop_name"],
-            hovertemplate="<b>%{hovertext}</b><extra></extra>",
+            hovertemplate="<b>%{hovertext}</b><br>Route: "
+                          + html.escape(str(route_label)) + "<extra></extra>",
             showlegend=False,
             legendgroup=agency_group,
             cliponaxis=False,
             uid=f"stops-{route_id}",
         ))
 
-        fig.add_trace(go.Scatter(
-            x=ordered["stop_lon"],
-            y=ordered["stop_lat"],
-            mode="text",
-            text=display_texts,
-            textposition=choose_textpositions(ordered),
-            textfont=dict(
-                size=12,
-                color="#111111",
-                family="Arial, sans-serif",
+        # --------------------------------------------------------
+        # ORDINARY STOP LABELS
+        # --------------------------------------------------------
+        for index, (_, stop_row) in enumerate(ordered.iterrows()):
+            stop_name = "" if pd.isna(stop_row["stop_name"]) else str(stop_row["stop_name"]).strip()
+            stop_lat = float(stop_row["stop_lat"])
+            stop_lon = float(stop_row["stop_lon"])
+            stop_key = (
+                stop_name.casefold(),
+                round(stop_lat, 6),
+                round(stop_lon, 6),
+            )
+
+            # Shared stops are handled once, centrally, after all route lines.
+            if stop_key in shared_stops:
+                continue
+
+            is_terminal = index == 0 or index == len(ordered) - 1
+            if label_density == "Major exchanges only":
+                label_name = stop_label_name(stop_name)
+                if not is_major_transit_stop(label_name):
+                    continue
+            if label_density == "Every other stop" and index % 2 == 1 and not is_terminal:
+                continue
+            if label_density == "Terminals & interchanges only" and not is_terminal:
+                continue
+
+            label_name = stop_label_name(stop_name)
+            if label_name.casefold() in hidden_label_keys:
+                continue
+            label = format_stop_name(label_name)
+            if not label:
+                continue
+            current_width = label_width_chars(label)
+            label_name_key = label_name.casefold()
+            # Numbered variants ('Kalanki 1', 'Kalanki 2', ...) collapse to one
+            # label: only the FIRST occurrence of a base name gets a label.
+            if label_name_key in seen_base_names:
+                continue
+
+            # Reserve enough geographic space for the actual text width.
+            # Long labels need more separation than short stop names.
+            too_close = any(
+                stop_distance_m(stop_lat, stop_lon, lat0, lon0)
+                < max(650, (current_width + previous_width) * 14)
+                for lat0, lon0, previous_width in ordinary_label_points
+            )
+            if too_close:
+                continue
+            ordinary_label_points.append((stop_lat, stop_lon, current_width))
+            seen_base_names.add(label_name_key)
+
+            position = choose_label_position(label, draw_lons[index], draw_lats[index])
+            if position is None:
+                continue
+            xshift, yshift, xanchor, yanchor = position
+
+            fig.add_annotation(
+                x=draw_lons[index],
+                y=draw_lats[index],
+                xref="x", yref="y",
+                text=label,
+                showarrow=False,
+                xshift=xshift,
+                yshift=yshift,
+                xanchor=xanchor,
+                yanchor=yanchor,
+                align="left" if xanchor == "left" else "right" if xanchor == "right" else "center",
+                bgcolor="rgba(255,255,255,0)",
+                borderwidth=0,
+                borderpad=0,
+                font=dict(size=10, color="#111111", family="Arial, sans-serif"),
+            )
+
+    # ------------------------------------------------------------
+    # SHARED / INTERCHANGE STOPS
+    # ------------------------------------------------------------
+    # One common center is kept at the true stop coordinate. Each fanned route
+    # is connected back to it. The oval surrounds the common stop and contains
+    # small route-colored indicators so the user can immediately see that the
+    # stop belongs to multiple routes.
+    for shared_key in shared_stops:
+        name_key, lat, lon = shared_key
+        routes_here = stop_routes[shared_key]
+        if not routes_here:
+            continue
+
+        # Recover a readable stop name from any route occurrence.
+        shared_name = name_key
+        for rid in routes_here:
+            ordered = route_data[rid]
+            for _, row in ordered.iterrows():
+                candidate = "" if pd.isna(row["stop_name"]) else str(row["stop_name"]).strip()
+                if candidate.casefold() == name_key:
+                    shared_name = candidate
+                    break
+            if shared_name != name_key:
+                break
+
+        if stop_label_name(shared_name).casefold() in hidden_label_keys:
+            continue
+
+        # Place one interchange marker on each shifted route copy. This keeps
+        # the marker physically attached to the colored line.
+        shared_points = []
+        shared_colors = []
+        for rid in routes_here:
+            draw_lons, draw_lats = draw_cache[rid]
+            ordered = route_data[rid]
+            found = None
+            for i, (_, row) in enumerate(ordered.iterrows()):
+                key = (
+                    ("" if pd.isna(row["stop_name"]) else str(row["stop_name"]).strip()).casefold(),
+                    round(float(row["stop_lat"]), 6),
+                    round(float(row["stop_lon"]), 6),
+                )
+                if key == shared_key:
+                    found = i
+                    break
+            if found is None:
+                continue
+
+            color = ROUTE_COLOR_HEX.get(
+                route_color_map.get(rid, "blue"),
+                route_color_map.get(rid, "#1d4ed8"),
+            )
+            shared_points.append((draw_lons[found], draw_lats[found]))
+            shared_colors.append(color)
+
+        if shared_points:
+            fig.add_trace(go.Scatter(
+            x=[lon],
+            y=[lat],
+            mode="markers",
+            marker=dict(
+                size=8,
+                symbol="circle",
+                color="white",
+                line=dict(color="#111111", width=2.5),
             ),
-            hoverinfo="skip",
+            hovertext=[shared_name],
+            hovertemplate="<b>%{hovertext}</b><br>Shared by "
+                          + str(len(routes_here)) + " routes<extra></extra>",
             showlegend=False,
             cliponaxis=False,
-            uid=f"stop-labels-{route_id}",
-        ))
+            uid=f"shared-center-{name_key}",
+            ))
+
+            # Data-coordinate ring stays attached to every shifted route copy
+            # when the user zooms or pans the map.
+            ring_radius = max(
+                max(
+                    math.hypot(point[0] - lon, point[1] - lat)
+                    for point in shared_points
+                ),
+                bbox_diag * 0.004,
+            )
+            fig.add_shape(
+                type="circle",
+                xref="x",
+                yref="y",
+                x0=lon - ring_radius,
+                x1=lon + ring_radius,
+                y0=lat - ring_radius,
+                y1=lat + ring_radius,
+                line=dict(color="#111111", width=2),
+                fillcolor="rgba(255,255,255,0.05)",
+                layer="above",
+            )
+
+        # One clean label for the interchange, horizontally beside the oval.
+        # Use the base name (no trailing number) and skip it if a label for
+        # this base name is already on the map (e.g. a nearby 'Kalanki 1'
+        # stop already labeled on one of the routes).
+        shared_base_name = stop_label_name(shared_name)
+        if (
+            label_density == "Major exchanges only"
+            and not is_major_transit_stop(shared_base_name)
+        ):
+            continue
+        if shared_base_name.casefold() in seen_base_names:
+            continue
+        seen_base_names.add(shared_base_name.casefold())
+        fig.add_annotation(
+            x=lon, y=lat,
+            xref="x", yref="y",
+            text=format_stop_name(shared_base_name, max_chars=24),
+            showarrow=False,
+            xshift=24,
+            yshift=0,
+            xanchor="left",
+            yanchor="bottom",
+            align="left",
+            bgcolor="rgba(255,255,255,0.88)",
+            bordercolor="rgba(255,255,255,0.95)",
+            borderwidth=2,
+            borderpad=2,
+            font=dict(size=11, color="#111111", family="Arial, sans-serif"),
+        )
+
+    # ------------------------------------------------------------
+    # FINAL LAYOUT
+    # ------------------------------------------------------------
+    lon_min, lon_max = min(map_lons), max(map_lons)
+    lat_min, lat_max = min(map_lats), max(map_lats)
+    lon_padding = max((lon_max - lon_min) * 0.36, 0.012)
+    lat_padding = max((lat_max - lat_min) * 0.36, 0.012)
 
     fig.update_layout(
+        template="plotly_white",
         title=dict(
             text=title_text,
             font=dict(size=24, color="#111111"),
@@ -729,52 +1130,37 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         font=dict(color="#111111"),
         legend=dict(
             title="Routes",
-            orientation="h",
-            bgcolor="rgba(255,255,255,0.9)",
-            bordercolor="rgba(0,0,0,0.15)",
+            orientation="v",
+            bgcolor="rgba(255,255,255,0.94)",
+            bordercolor="rgba(0,0,0,0.12)",
             borderwidth=1,
-            font=dict(color="#111111"),
-            xref="paper",
-            yref="paper",
-            x=0.0,
-            y=-0.14,
-            xanchor="left",
-            yanchor="top",
+            font=dict(color="#111111", size=11),
+            xref="paper", yref="paper",
+            x=1.02, y=1.0,
+            xanchor="left", yanchor="top",
         ),
         xaxis=dict(
             visible=False,
-            autorange=True,
+            range=[lon_min - lon_padding, lon_max + lon_padding],
+            fixedrange=False,
+            showgrid=False,
+            zeroline=False,
         ),
         yaxis=dict(
             visible=False,
-            autorange=True,
+            range=[lat_min - lat_padding, lat_max + lat_padding],
+            fixedrange=False,
+            showgrid=False,
+            zeroline=False,
         ),
         autosize=True,
-        height=700,
-        margin=dict(t=100, b=150, l=160, r=160),
+        height=820,
+        margin=dict(t=85, b=45, l=35, r=245),
         hovermode="closest",
         dragmode="pan",
+        annotations=fig.layout.annotations,
         uirevision=",".join(sorted(selected_routes)),
     )
-
-    if map_lons and map_lats:
-        lon_min, lon_max = min(map_lons), max(map_lons)
-        lat_min, lat_max = min(map_lats), max(map_lats)
-        # generous padding so zoomed/panned states still have room for
-        # label text outside the point cloud before anything gets clipped
-        lon_padding = max((lon_max - lon_min) * 0.18, 0.006)
-        lat_padding = max((lat_max - lat_min) * 0.18, 0.006)
-        fig.update_xaxes(range=[lon_min - lon_padding, lon_max + lon_padding])
-        fig.update_yaxes(range=[lat_min - lat_padding, lat_max + lat_padding])
-
-    if not any_data:
-        fig.add_annotation(
-            text="No stop-sequence data found for the selected route(s).",
-            showarrow=False,
-            font=dict(size=14, color="#666666"),
-            xref="paper", yref="paper",
-            x=0.5, y=0.5
-        )
 
     return fig
 
@@ -984,10 +1370,6 @@ def create_filtered_gtfs(selected_routes_tuple):
     if "service_id" not in trips_df or trips_df["service_id"].isna().any():
         raise ValueError("Selected trips contain a missing service_id.")
 
-    # Force route_color to match the exact colors used in the sidebar /
-    # Transit Map (ROUTE_COLOR_HEX), so the LOOM SVG map's line colors are
-    # the same as the colors the user selected, not whatever is (or isn't)
-    # in the raw GTFS feed's route_color column.
     _, route_hex_map = get_route_color_maps()
     routes_df["route_color"] = (
         routes_df["route_id"]
@@ -1134,7 +1516,6 @@ def create_filtered_gtfs(selected_routes_tuple):
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-
 def check_loom_installation():
     binaries = ("gtfs2graph", "topo", "loom", "octi", "transitmap")
     if loom_uses_wsl():
@@ -1196,20 +1577,11 @@ def check_loom_installation():
 
         if dependency_errors:
             raise RuntimeError(
-                "LOOM binary dependency check failed. Install the system "
-                "packages listed in packages.txt. If libzip.so.5 or the "
-                "requested COIN-OR SONAMEs remain unavailable after install, "
-                "rebuild the LOOM binaries in the deployment environment.\n\n" +
                 "\n\n".join(dependency_errors)
             )
 
 
 def get_octi_help():
-    """Run `octi -h` against your actual build so you can see the real flag
-    names it supports (e.g. cell/grid size, base grid type, penalties)
-    instead of guessing. Call this from the UI (Advanced expander) once,
-    read the printed flags, then use `octi_extra_args` to pass whichever
-    one controls grid/cell size."""
     check_loom_installation()
     loom_dir = shlex.quote(LOOM_DIR_WSL if loom_uses_wsl() else LOOM_DIR_NATIVE)
     return run_loom_command(f"{loom_dir}/octi -h 2>&1")
@@ -1221,38 +1593,9 @@ def get_transitmap_help():
     loom_dir = shlex.quote(LOOM_DIR_WSL if loom_uses_wsl() else LOOM_DIR_NATIVE)
     return run_loom_command(f"{loom_dir}/transitmap -h 2>&1")
 def raise_labels_above_markers(svg):
-    """Reorder each group's children so <text> elements (station-name
-    labels) always come AFTER non-text siblings (station markers, route
-    lines) in document order.
-
-    WHY THIS EXISTS: SVG paints elements in document order -- whatever
-    comes later in the markup is drawn on top. LOOM's `transitmap` output
-    apparently emits each station's label <text> BEFORE that station's
-    marker shape (the white pill/capsule outline) in some groups, so the
-    marker gets painted over the start of the label. That's what makes
-    names look truncated from the front, e.g. "Machhapokhari" rendering
-    as "achha Pokhari" -- the "M" (and sometimes the next letter) is
-    hidden under the marker, not actually missing from the data.
-
-    This function only reorders SIBLINGS within their existing parent
-    element -- it never moves a <text> node to a different parent -- so
-    any transform="..." on an ancestor <g> is preserved and coordinates
-    stay correct. It walks the whole tree, so nested groups are covered.
-
-    NOTE: this does not address stops with NO label at all. That looks
-    like LOOM's own automatic label-overlap avoidance choosing to drop a
-    conflicting label rather than draw overlapping text -- a layout
-    decision made inside LOOM itself, not a draw-order issue. If that
-    keeps happening, check `transitmap -h` (see get_transitmap_help()) for
-    a flag that controls label density/overlap tolerance, or try
-    increasing line_spacing so fewer stations end up close enough to
-    trigger the conflict in the first place.
-    """
     try:
         root = ET.fromstring(svg)
     except ET.ParseError:
-        # If LOOM's output isn't strict XML for some reason, skip this
-        # post-processing step rather than risk corrupting the SVG.
         return svg
 
     def tag_local(el):
@@ -1310,11 +1653,7 @@ def scale_label_font_size(svg, scale_factor=1.5):
     scale_element(root)
 
     # ---- per-glyph tspan fix -----------------------------------------
-    # LOOM writes some labels as one <tspan> per glyph with explicit x/dx
-    # positions computed for the ORIGINAL font size, plus textLength/
-    # lengthAdjust pinning the run to the original width. Scaling only
-    # font-size makes the enlarged glyphs overlap / get squeezed into the
-    # old box, which reads as letters being chopped off.
+
     text_tag = root.tag.split('}')[0] + '}text' if root.tag.startswith('{') else 'text'
     tspan_tag = text_tag.rsplit('}', 1)[0] + '}tspan' if '}' in text_tag else 'tspan'
 
@@ -1362,13 +1701,6 @@ def scale_label_font_size(svg, scale_factor=1.5):
                     pass
 
     # ---- textPath label-path stretch fix ------------------------------
-    # LOOM draws station labels as <textPath> along tiny helper paths
-    # ("M x1 y1 L x2 y2") sized for the ORIGINAL font size. Per the SVG
-    # spec, glyphs that run past the end of the path are NOT rendered, so
-    # scaling the font without stretching the path makes the tail of every
-    # label disappear (e.g. "Swayambhu Bus Stop1" -> "Swayambh"). Stretch
-    # each label path by the same factor, anchored at the correct end so
-    # the label stays aligned with its station.
     textpath_tag = text_tag.rsplit('}', 1)[0] + '}textPath' if '}' in text_tag else 'textPath'
     xlink_href = '{http://www.w3.org/1999/xlink}href'
 
@@ -1404,9 +1736,7 @@ def scale_label_font_size(svg, scale_factor=1.5):
             else:
                 ref = pts[0]                       # keep start fixed
 
-            # 50% headroom: some of LOOM's original label paths are already
-            # tighter than the text they hold, so scale purely proportional
-            # stretching can still leave long labels clipped at the tail.
+
             path_stretch = scale_factor * 1.5
 
             xs = [p[0] for p in pts]
@@ -1429,10 +1759,6 @@ def scale_label_font_size(svg, scale_factor=1.5):
 
 
 def remove_line_labels(svg):
-    """Remove the route-name labels LOOM paints along the lines
-    (<text class="line-label">, e.g. 'Kathmandu Ringroad via Balkot to ...')
-    plus the helper <path> elements they follow, so only station names
-    remain on the map."""
     try:
         root = ET.fromstring(svg)
     except ET.ParseError:
@@ -1465,12 +1791,6 @@ def remove_line_labels(svg):
 
 
 def separate_station_labels(svg):
-    """Nudge station-name labels apart so they don't touch/overlap.
-
-    Estimates each label's bounding box from its (already stretched)
-    textPath geometry and font size, then deterministically stacks labels
-    below (or beside, for vertical labels) any already-placed label they
-    would overlap. One-directional pushing can't oscillate."""
     try:
         root = ET.fromstring(svg)
     except ET.ParseError:
@@ -1516,16 +1836,52 @@ def separate_station_labels(svg):
                 'text': label_text,
             })
 
+    # Keep every station name horizontal and left-to-right. LOOM can emit
+    # label paths in different directions depending on the route geometry.
+    for label in labels:
+        points = label['pts']
+        if len(points) < 2:
+            continue
+
+        path_length = sum(
+            math.hypot(x2 - x1, y2 - y1)
+            for (x1, y1), (x2, y2) in zip(points, points[1:])
+        )
+        start_x, start_y = points[0]
+        end_x, end_y = points[-1]
+        center_x = (start_x + end_x) / 2
+        center_y = (start_y + end_y) / 2
+        half_length = max(path_length / 2, label['fs'])
+        normalized_points = [
+            (center_x - half_length, center_y),
+            (center_x + half_length, center_y),
+        ]
+        label['path_el'].set(
+            'd',
+            f'M {normalized_points[0][0]:.3f} {normalized_points[0][1]:.3f} '
+            f'L {normalized_points[1][0]:.3f} {normalized_points[1][1]:.3f}',
+        )
+        label['pts'] = normalized_points
+        label['cmds'] = ['M', 'L']
+
     def bbox(lb):
         xs = [p[0] for p in lb['pts']]
         ys = [p[1] for p in lb['pts']]
         horiz = (max(xs) - min(xs)) >= (max(ys) - min(ys))
         if horiz:
-            # baseline sits at y; box extends upward by ~1em. Use the full
-            # (stretched) path span as the box, since paths were sized to
-            # fit the text.
-            return min(xs), min(ys) - lb['fs'], max(xs), max(ys), True
-        return min(xs) - lb['fs'], min(ys), max(xs), max(ys), False
+            path_width = max(xs) - min(xs)
+            text_width = max(len(lb['text']) * lb['fs'] * 0.62, lb['fs'])
+            half_width = max(path_width, text_width) / 2
+            center_x = (min(xs) + max(xs)) / 2
+            center_y = (min(ys) + max(ys)) / 2
+            return (
+                center_x - half_width,
+                center_y - lb['fs'] * 1.25,
+                center_x + half_width,
+                center_y + lb['fs'] * 0.25,
+                True,
+            )
+        return min(xs) - lb['fs'], min(ys), max(xs) + lb['fs'], max(ys), False
 
     def shift(lb, horiz, delta):
         pts = lb['pts']
@@ -1549,9 +1905,7 @@ def separate_station_labels(svg):
         boxes.append({'lb': lb, 'x0': x0, 'y0': y0, 'x1': x1, 'y1': y1,
                       'horiz': horiz})
 
-    # Deterministic placement: sort labels top-to-bottom (left-to-right
-    # for vertical ones) and stack each one BELOW any already-placed
-    # label it would overlap.
+
     def overlaps(a, b):
         return (a['x0'] < b['x1'] and b['x0'] < a['x1'] and
                 a['y0'] < b['y1'] and b['y0'] < a['y1'])
@@ -1565,7 +1919,7 @@ def separate_station_labels(svg):
         placed = []
         for bx in group:
             fs = bx['lb']['fs']
-            step = fs * 1.35
+            step = fs * 1.8
             guard = 0
             while any(overlaps(bx, p) for p in placed) and guard < 40:
                 shift(bx['lb'], bx['horiz'], step)
@@ -1582,7 +1936,6 @@ def separate_station_labels(svg):
 
 
 def expand_label_clip_paths(svg, scale_factor=1.5):
-    """Expand clip rectangles that constrain station labels."""
     try:
         root = ET.fromstring(svg)
     except ET.ParseError:
@@ -1641,7 +1994,6 @@ def expand_label_clip_paths(svg, scale_factor=1.5):
 
 
 def bring_labels_to_front(svg):
-    """Move all SVG text labels to the document's paint-order front."""
     try:
         root = ET.fromstring(svg)
     except ET.ParseError:
@@ -1705,24 +2057,7 @@ def bring_labels_to_front(svg):
 
 
 def pad_svg_viewbox(svg, pad=150):
-    """Expand an SVG's viewBox (and its width/height attributes) by `pad`
-    pixels on every side.
 
-    WHY THIS EXISTS: LOOM's `transitmap` binary sizes the SVG canvas from
-    the route-line geometry, not from how wide the station-name text is.
-    Station labels are real <text> elements that can sit partway (or
-    fully) outside that geometric bounding box. Anything downstream that
-    embeds this SVG into a fixed-size viewport -- our own <image> tag in
-    build_composite_svg(), a bare <img> tag, or a browser rendering the
-    raw SVG file directly -- will hard-clip at the declared width/height,
-    which is what makes station names look cut off/incomplete on the LOOM
-    map specifically (the Plotly "Transit Map" view is unaffected, since
-    it lays out its own text with `cliponaxis=False` and axis autorange).
-
-    Padding the viewBox out (while also enlarging width/height so the
-    aspect ratio and coordinate system stay consistent) gives the label
-    text room to sit inside the canvas instead of right at its edge.
-    """
     vb_match = re.search(
         r'viewBox="([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)"', svg
     )
@@ -1761,9 +2096,149 @@ def pad_svg_viewbox(svg, pad=150):
     return svg
 
 
+# ============================================================
+# MANUAL LABEL OVERRIDES (NEW FEATURE)
+# ============================================================
+# Lets the user pick ONE bad-looking station label from the LOOM SVG and
+# nudge/rotate just that label, leaving every other label exactly as LOOM
+# rendered it. Two helpers:
+#   - get_svg_label_texts(svg): lists every station-label text + its anchor
+#     point, so the UI can offer a dropdown of "which label is wrong".
+#   - apply_manual_label_overrides(svg, overrides): wraps only the matching
+#     <text class="station-label"> (and its owned textPath <path>, if any)
+#     in its own <g transform="..."> so it can move/rotate independently.
+# ============================================================
+
+def get_svg_label_texts(svg):
+    """Return [{'text', 'cx', 'cy'}] for every station-label in the SVG,
+    used to populate the 'which label do you want to fix' dropdown."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return []
+
+    def tag_local(el):
+        return el.tag.split('}')[-1] if '}' in el.tag else el.tag
+
+    xlink_href = '{http://www.w3.org/1999/xlink}href'
+    path_map = {
+        el.get('id'): el for el in root.iter()
+        if tag_local(el) == 'path' and el.get('id')
+    }
+
+    labels = []
+    for text in root.iter():
+        if tag_local(text) != 'text' or 'station-label' not in (text.get('class') or ''):
+            continue
+        label_text = ''.join(text.itertext()).strip()
+        if not label_text:
+            continue
+
+        cx = cy = None
+        for tp in text:
+            if tag_local(tp) == 'textPath':
+                href = tp.get(xlink_href) or tp.get('href')
+                path_el = path_map.get((href or '').split('#')[-1])
+                if path_el is not None:
+                    d = path_el.get('d') or ''
+                    segs = re.findall(r'([A-Za-z])\s*(-?[\d.eE+]+)[\s,]+(-?[\d.eE+]+)', d)
+                    if segs:
+                        xs = [float(a) for _, a, b in segs]
+                        ys = [float(b) for _, a, b in segs]
+                        cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+
+        if cx is None:
+            try:
+                cx, cy = float(text.get('x') or 0), float(text.get('y') or 0)
+            except (TypeError, ValueError):
+                cx, cy = 0.0, 0.0
+
+        labels.append({'text': label_text, 'cx': cx, 'cy': cy})
+
+    return labels
+
+
+def apply_manual_label_overrides(svg, label_overrides):
+    """
+    label_overrides: {label_text: {'rotate': deg, 'dx': px, 'dy': px}}
+    Wraps only the matching <text class="station-label"> (and its textPath
+    path, if it has one) in its own <g transform="..."> so it moves/rotates
+    independently of everything else LOOM drew.
+    """
+    if not label_overrides:
+        return svg
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    ns = root.tag.split('}')[0] + '}' if root.tag.startswith('{') else ''
+
+    def tag_local(el):
+        return el.tag.split('}')[-1] if '}' in el.tag else el.tag
+
+    parent_map = {c: p for p in root.iter() for c in p}
+    xlink_href = '{http://www.w3.org/1999/xlink}href'
+    path_map = {
+        el.get('id'): el for el in root.iter()
+        if tag_local(el) == 'path' and el.get('id')
+    }
+
+    for text in list(root.iter()):
+        if tag_local(text) != 'text' or 'station-label' not in (text.get('class') or ''):
+            continue
+        label_text = ''.join(text.itertext()).strip()
+        override = label_overrides.get(label_text)
+        if not override:
+            continue
+
+        parent = parent_map.get(text)
+        if parent is None:
+            continue
+
+        cx = cy = 0.0
+        owned_path = None
+        for tp in text:
+            if tag_local(tp) == 'textPath':
+                href = tp.get(xlink_href) or tp.get('href')
+                owned_path = path_map.get((href or '').split('#')[-1])
+                if owned_path is not None:
+                    d = owned_path.get('d') or ''
+                    segs = re.findall(r'([A-Za-z])\s*(-?[\d.eE+]+)[\s,]+(-?[\d.eE+]+)', d)
+                    if segs:
+                        xs = [float(a) for _, a, b in segs]
+                        ys = [float(b) for _, a, b in segs]
+                        cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+
+        if cx == 0 and cy == 0:
+            try:
+                cx = float(text.get('x') or 0)
+                cy = float(text.get('y') or 0)
+            except (TypeError, ValueError):
+                pass
+
+        angle = override.get('rotate', 0)
+        dx = override.get('dx', 0)
+        dy = override.get('dy', 0)
+
+        wrapper = ET.Element(ns + 'g')
+        wrapper.set('transform', f'translate({dx},{dy}) rotate({angle} {cx:.2f} {cy:.2f})')
+
+        parent.remove(text)
+        wrapper.append(text)
+
+        if owned_path is not None:
+            path_parent = parent_map.get(owned_path)
+            if path_parent is not None:
+                path_parent.remove(owned_path)
+                wrapper.append(owned_path)
+
+        parent.append(wrapper)
+
+    return ET.tostring(root, encoding='unicode')
+
+
 @st.cache_data(show_spinner=False)
-
-
 def generate_loom_svg(
     selected_routes_tuple,
     schematic=True,
@@ -1781,13 +2256,12 @@ def generate_loom_svg(
 
     octi_cmd = f"{loom_dir}/octi"
     if octi_extra_args and octi_extra_args.strip():
-        # extra flags discovered via `octi -h` (see get_octi_help), e.g. a
-        # cell/grid-size flag, so the octilinear map doesn't over-distort
-        # long, sparse routes into exaggerated zig-zags
         octi_cmd += f" {octi_extra_args.strip()}"
 
-    # transitmap's own flags for thicker, more spaced-out lines (route
-    # colors themselves come from routes.txt route_color / route_color_map)
+    # Let transitmap handle station labels natively for BOTH modes, exactly
+    # like app.py: no --station-label-textsize override, then apply app.py's
+    # post-processing pipeline (font scaling, clip expansion, label
+    # separation) to the SVG.
     transitmap_cmd = (
         f"{loom_dir}/transitmap -l "
         f"--line-width {line_width} --line-spacing {line_spacing}"
@@ -1806,11 +2280,6 @@ def generate_loom_svg(
             f"LOOM did not return a valid SVG.\n\nOutput:\n{svg[:2000]}"
         )
 
-    # FIX (letters hidden under station markers, e.g. "Machhapokhari"
-    # rendering as "achha Pokhari"): reorder siblings so text always
-    # paints on top of markers/lines. Must run BEFORE pad_svg_viewbox,
-    # since that only touches the outer viewBox/width/height, not
-    # element order.
     svg = raise_labels_above_markers(svg)
     svg = bring_labels_to_front(svg)
 
@@ -1819,17 +2288,9 @@ def generate_loom_svg(
         svg = expand_label_clip_paths(svg, scale_factor=label_font_scale)
         svg = bring_labels_to_front(svg)  # re-raise labels above enlarged glyphs/markers
 
-    # remove the route-name labels painted along the lines (user request:
-    # only station names should appear), then push any overlapping station
-    # labels apart so they don't touch each other
     svg = remove_line_labels(svg)
     svg = separate_station_labels(svg)
 
-    # FIX (incomplete/clipped stop names on the LOOM map): transitmap sizes
-    # the SVG canvas from line geometry only, so long station labels near
-    # the edges can sit outside the declared width/height and get clipped
-    # once this SVG is embedded downstream. Pad the canvas out here, right
-    # at the source, before anything else touches it.
     if label_pad and label_pad > 0:
         svg = pad_svg_viewbox(svg, pad=label_pad)
 
@@ -1847,41 +2308,12 @@ def build_composite_svg(
     route_agency_map=None,
     title_text="Transit Map of Kathmandu Valley"
 ):
-    """Builds a single, self-contained SVG that embeds the raw LOOM SVG
-    output plus a real title and legend drawn as native SVG elements.
 
-    This exists because the raw LOOM output (from `generate_loom_svg`) is
-    just the map itself -- the title header and legend box shown on screen
-    are separate HTML <div>s layered around the <img>, not part of the SVG
-    data. Downloading the <img> source alone (the old behaviour) therefore
-    always produced a file with no title/legend. Wrapping everything into
-    one composite SVG here means the downloaded .svg (and, via rasterizing
-    this composite, the .png) actually contains the title and legend.
-
-    NOTE: `svg` arriving here has already been through pad_svg_viewbox()
-    inside generate_loom_svg(), so the width/height parsed below already
-    include the label padding -- station names that used to run past the
-    old (unpadded) canvas edge now have room inside it instead of being
-    clipped by the <image> element below.
-    """
     w_match = re.search(r'width="([\d.]+)', svg)
     h_match = re.search(r'height="([\d.]+)', svg)
     w = float(w_match.group(1)) if w_match else 1200.0
     h = float(h_match.group(1)) if h_match else 800.0
 
-    # Layout constants (all in px, laid out top-to-bottom):
-    #   header_h        -- title-only banner above the map (subtitle removed
-    #                       per request, so this no longer needs room for it)
-    #   legend_header_h -- gap below the map before the "Routes" label,
-    #                       plus room for the label itself
-    #   legend_row_h    -- vertical spacing PER legend row
-    #   legend_bottom_pad -- breathing room after the last legend row
-    #
-    # NOTE (fix): the previous version placed the "Routes" label and the
-    # first legend row only ~4px apart (they were computed from nearly the
-    # same y-offset), so they rendered on top of one another. Spacing is
-    # now generous and each element has its own dedicated offset so rows
-    # can never collide with the header or each other.
     header_h = 55
     legend_header_h = 50
     legend_row_h = 26
@@ -1896,7 +2328,43 @@ def build_composite_svg(
     total_w = w
     total_h = h + header_h + legend_h
 
-    encoded_inner = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    # Inline the raw LOOM SVG directly (NOT as a base64 <image>, and NOT as
+    # a nested <svg>). Both of those approaches break in several viewers:
+    #   - base64 <image>: blank / colorless map in Inkscape, Illustrator, etc.
+    #   - nested <svg>: many standalone renderers mishandle a nested viewport
+    #     with its own viewBox, so only some layers (e.g. the routes) show.
+    # The robust approach is to FLATTEN: hoist the inner SVG's children into
+    # the composite document inside a <g>, translating by the inner viewBox
+    # origin so the map lands exactly in the map area (below the title).
+    inner_svg = None
+    try:
+        inner_root = ET.fromstring(svg)
+        vb = (inner_root.get('viewBox') or '').replace(',', ' ').split()
+        vb_x, vb_y = 0.0, 0.0
+        if len(vb) == 4:
+            try:
+                vb_x, vb_y = float(vb[0]), float(vb[1])
+            except ValueError:
+                pass
+        inner_parts = [
+            ET.tostring(child, encoding='unicode')
+            for child in list(inner_root)
+        ]
+        inner_svg = (
+            f'<g transform="translate({-vb_x:.3f},{header_h - vb_y:.3f})">'
+            + ''.join(inner_parts)
+            + '</g>'
+        )
+    except ET.ParseError:
+        inner_svg = None
+    if not inner_svg:
+        # last-resort fallback: text surgery without viewBox compensation
+        inner_open = re.search(r'<svg\b[^>]*>', svg)
+        if inner_open:
+            inner_content = svg[inner_open.end():].rsplit('</svg>', 1)[0]
+            inner_svg = f'<g transform="translate(0,{header_h})">{inner_content}</g>'
+        else:
+            inner_svg = f'<g transform="translate(0,{header_h})">{svg}</g>'
 
     legend_top = h + header_h  # y where the legend block begins
     legend_items_svg = []
@@ -1929,8 +2397,7 @@ def build_composite_svg(
   <text x="{total_w / 2}" y="{header_h / 2 + 8}" text-anchor="middle"
         font-family="Arial, sans-serif" font-size="24" font-weight="700"
         fill="#111111">{escaped_title}</text>
-  <image x="0" y="{header_h}" width="{w}" height="{h}"
-         xlink:href="data:image/svg+xml;base64,{encoded_inner}"/>
+  {inner_svg}
   <text x="20" y="{legend_top + 24}" font-family="Arial, sans-serif"
         font-size="14" font-weight="700" fill="#111111">Routes</text>
   {legend_svg}
@@ -1938,12 +2405,11 @@ def build_composite_svg(
 
 
 def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None):
+    # Downloads export the BARE LOOM transit map (no title / no legend),
+    # exactly the map shown on screen. The composite with title+legend is
+    # no longer used for exports.
     encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
-    composite_svg = build_composite_svg(
-        svg, selected_routes, route_name_map, route_color_hex_map,
-        route_agency_map=route_agency_map,
-    )
-    composite_b64 = base64.b64encode(composite_svg.encode("utf-8")).decode("ascii")
+    composite_b64 = encoded
 
     legend_groups = {}
     for route_id in selected_routes:
@@ -2011,13 +2477,11 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
       </div>
     </div>
     <script>
-      // Base64 of a complete, standalone SVG that already contains the
-      // title, subtitle, map, and legend baked in as native SVG elements.
-      // Both download buttons below use THIS (not the bare <img> src) so
-      // exported files match what's on screen.
+      // Base64 of the raw LOOM transit map SVG — exports are just the map,
+      // with no extra title or legend baked in.
       const loomCompositeSvgDataUrl = "data:image/svg+xml;base64,{composite_b64}";
 
-      let loomScale = 1;
+      let loomScale = 1.5; // start zoomed in
             let loomPanX = 0;
             let loomPanY = 0;
             let loomDragging = false;
@@ -2045,6 +2509,25 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
       }}
 
             const loomImg = document.getElementById('loom-img');
+
+            // apply the initial zoom
+            loomApplyTransform();
+
+            // mouse-wheel zoom (zoom towards the cursor)
+            document.getElementById('loom-scroll').addEventListener('wheel', function(event) {{
+                if (!event.ctrlKey && !event.metaKey && Math.abs(event.deltaY) < 2) return;
+                event.preventDefault();
+                const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+                const rect = loomImg.getBoundingClientRect();
+                const cx = event.clientX - rect.left;
+                const cy = event.clientY - rect.top;
+                const newScale = Math.min(Math.max(loomScale * factor, 0.3), 8);
+                loomPanX = cx - (cx - loomPanX) * (newScale / loomScale);
+                loomPanY = cy - (cy - loomPanY) * (newScale / loomScale);
+                loomScale = newScale;
+                loomApplyTransform();
+            }}, {{ passive: false }});
+
             loomImg.addEventListener('pointerdown', function(event) {{
                 loomDragging = true;
                 loomDragStartX = event.clientX;
@@ -2087,9 +2570,7 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
         a.remove();
       }}
 
-      // FIX: previously fetched document.getElementById('loom-img').src,
-      // which is just the bare LOOM map with no title/legend. Now uses the
-      // composite SVG (title + subtitle + map + legend) built server-side.
+      // Export the bare transit map (same SVG displayed on screen).
       async function loomDownloadSVG() {{
         try {{
           const res = await fetch(loomCompositeSvgDataUrl);
@@ -2102,11 +2583,8 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
         }}
       }}
 
-      // FIX: previously drew only the <img> (bare map) onto a canvas, so
-      // the exported PNG had no title/legend either. Now rasterizes the
-      // same composite SVG used for the SVG download, guaranteeing the
-      // PNG and SVG exports always match and both include the header
-      // and legend.
+      // PNG export rasterizes the same bare map SVG used for the SVG
+      // download, so both exports match exactly what's on screen.
       async function loomDownloadPNG() {{
         try {{
           const scale = 3; // render at higher resolution than on-screen size
@@ -2153,12 +2631,24 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
             el.style.top = '0'; el.style.left = '0';
             el.style.width = '100vw'; el.style.height = '100vh';
             el.style.zIndex = '99999';
+            el.style.background = '#ffffff';
             scrollEl.style.height = 'calc(100vh - 44px)';
+            scrollEl.style.width = '100vw';
+            scrollEl.style.padding = '18px 24px 80px 24px';
+            loomImg.style.width = '96vw';
+            loomImg.style.minWidth = '1600px';
+            loomImg.style.maxWidth = 'none';
+            loomImg.style.margin = '0 auto';
           }} else {{
             el.style.position = 'relative';
             el.style.width = 'auto'; el.style.height = 'auto';
             el.style.zIndex = 'auto';
-            scrollEl.style.height = '680px';
+            scrollEl.style.height = '760px';
+            scrollEl.style.width = '100%';
+            scrollEl.style.padding = '24px 28px 70px 28px';
+            loomImg.style.width = '96%';
+            loomImg.style.minWidth = '1400px';
+            loomImg.style.maxWidth = 'none';
           }}
         }}
 
@@ -2187,7 +2677,7 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
       }});
     </script>
     """
-    st.components.v1.html(html_code, height=750, scrolling=True)
+    st.components.v1.html(html_code, height=830, scrolling=True)
 
 
 # ================= APP =================
@@ -2592,12 +3082,78 @@ with col_map1:
 
                 elif view_mode == "🚇 Transit Map":
 
+                    # ---- NEW: declutter controls -----------------------
+                    tm_col1, tm_col2, tm_col3 = st.columns([1.3, 1.3, 1])
+                    with tm_col1:
+                        tm_label_density = st.selectbox(
+                            "Label density",
+                            [
+                                "Major exchanges only",
+                                "Terminals & interchanges only",
+                                "Every other stop",
+                                "All stops",
+                            ],
+                            key="tm_label_density",
+                            help="Thin out station-name labels on busy, "
+                                 "multi-route selections.",
+                        )
+                    with tm_col2:
+                        tm_separate_routes = st.checkbox(
+                            "Separate overlapping routes",
+                            value=True,
+                            key="tm_separate_routes",
+                            help="Fans routes that share a corridor into "
+                                 "parallel lines instead of drawing them "
+                                 "on top of each other. Slightly shifts "
+                                 "lines/stops from their exact coordinates "
+                                 "for readability.",
+                        )
+                        tm_route_spacing = st.slider(
+                            "Spacing", 0.5, 3.0, 1.0, 0.25,
+                            key="tm_route_spacing",
+                            disabled=not tm_separate_routes,
+                        )
+                    with tm_col3:
+                        tm_show_markers = st.checkbox(
+                            "Show stop markers",
+                            value=True,
+                            key="tm_show_markers",
+                        )
+                        tm_schematic = st.checkbox(
+                            "Octilinear schematic",
+                            value=False,
+                            key="tm_schematic",
+                            help="Snap route segments to horizontal, vertical, "
+                                 "and diagonal legs while keeping stops anchored.",
+                        )
+
+                    label_options = sorted({
+                        re.sub(r"\s+\d+\s*$", "", str(stop_name).strip()).strip()
+                        or str(stop_name).strip()
+                        for route_id in selected_routes
+                        for stop_name in route_stops_ordered(route_id)["stop_name"]
+                        if not pd.isna(stop_name) and str(stop_name).strip()
+                    })
+                    tm_hidden_labels = st.multiselect(
+                        "Hide labels",
+                        label_options,
+                        key="tm_hidden_labels",
+                        help="Select stop labels to remove from the map. "
+                             "Markers and route lines remain visible.",
+                    )
+
                     fig_transit = build_transit_map(
                         selected_routes,
                         route_color_map,
                         route_name_map,
                         route_agency_map=route_agency_map,
                         title_text="Transit Map of Kathmandu Valley",
+                        separate_overlapping_routes=tm_separate_routes,
+                        route_spacing=tm_route_spacing,
+                        label_density=tm_label_density,
+                        show_stop_markers=tm_show_markers,
+                        schematic=tm_schematic,
+                        hidden_label_names=tuple(tm_hidden_labels),
                     )
 
                     st.plotly_chart(
@@ -2630,7 +3186,8 @@ with col_map1:
 
                     octi_extra_args = ""
                     if schematic:
-                        with st.expander("Advanced: octi tuning flags"):
+                        with st.container(border=True):
+                            st.markdown("**Advanced: octi tuning flags**")
                             st.caption(
                                 "octi's default grid/cell size can be too coarse "
                                 "for long, sparse routes, causing the zig-zag "
@@ -2668,31 +3225,37 @@ with col_map1:
 
                     # ---- NEW: label padding control (fixes incomplete /
                     # clipped station names) -------------------------------
-                    st.markdown("**Advanced: station label spacing**")
-                    st.caption(
-                        "LOOM sizes the map canvas from the route-line "
-                        "geometry only, not from how wide station-name "
-                        "text is. Labels near the edge of the map can "
-                        "therefore run past that canvas and get clipped "
-                        "('incomplete' stop names). Increasing this pads "
-                        "the canvas so labels have room to render fully."
+                    show_label_advanced = st.checkbox(
+                        "Show advanced station label settings",
+                        value=False,
+                        key="show_label_advanced",
                     )
-                    loom_label_pad = st.slider(
-                        "Label padding (px)",
-                        min_value=0, max_value=400, value=150, step=25,
-                        key="loom_label_pad",
-                    )
-                    loom_label_font_scale = st.slider(
-                        "Label font size x",
-                        min_value=0.5, max_value=3.0, value=1.0, step=0.1,
-                        key="loom_label_font_scale",
-                        help="Multiplies the font size in LOOM station labels.",
-                    )
-                    if st.button("Show `transitmap -h` output", key="transitmap_help_btn"):
-                        try:
-                            st.code(get_transitmap_help())
-                        except Exception as help_error:
-                            st.error(f"Couldn't fetch transitmap help: {help_error}")
+                    if show_label_advanced:
+
+                        st.caption(
+                            "LOOM sizes the map canvas from the route-line "
+                            "geometry only, not from how wide station-name "
+                            "text is. Labels near the edge of the map can "
+                            "therefore run past that canvas and get clipped "
+                            "('incomplete' stop names). Increasing this pads "
+                            "the canvas so labels have room to render fully."
+                        )
+                        loom_label_pad = st.slider(
+                            "Label padding (px)",
+                            min_value=0, max_value=400, value=150, step=25,
+                            key="loom_label_pad",
+                        )
+                        loom_label_font_scale = st.slider(
+                            "Label font size x",
+                            min_value=0.5, max_value=3.0, value=2.0, step=0.1,
+                            key="loom_label_font_scale",
+                            help="Multiplies the font size in LOOM station labels.",
+                        )
+                    else:
+                        loom_label_pad = st.session_state.get("loom_label_pad", 150)
+                        loom_label_font_scale = st.session_state.get(
+                            "loom_label_font_scale", 2.0
+                        )
 
                     try:
                         with st.spinner("Running LOOM pipeline..."):
@@ -2705,6 +3268,7 @@ with col_map1:
                                 label_pad=loom_label_pad,
                                 label_font_scale=loom_label_font_scale,
                             )
+
                         display_loom_svg(
                             svg,
                             selected_routes,
@@ -2863,7 +3427,10 @@ with left_container:
             **Duration:** {sel['duration']:.1f} min
             """)
 
-            m_preview = folium.Map(location=[27.7, 85.3],zoom_start=12,tiles="CartoDB positron")
+            m_preview = folium.Map(location=[27.7, 85.3], zoom_start=12, tiles=None)
+            # OpenStreetMap doesn't need an API key (CartoDB now returns a
+            # 'API key required' error image without one)
+            folium.TileLayer("OpenStreetMap", name="OpenStreetMap", show=True).add_to(m_preview)
             geom = route_geom(selected_route_id)
 
             for _, row in geom.iterrows():

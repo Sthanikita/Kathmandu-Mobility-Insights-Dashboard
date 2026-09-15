@@ -469,22 +469,6 @@ COLOR_EMOJI_MAP = {
     "grey": "◼️",
 }
 
-MAJOR_TRANSIT_STOPS = {
-    "kalanki",
-    "chabahil",
-    "koteshwor",
-    "balkhu",
-}
-
-
-def is_major_transit_stop(stop_name):
-    """Match numbered or extended GTFS names to a major exchange."""
-    normalized = re.sub(r"[\s_-]*\d+\s*$", "", str(stop_name).strip().casefold())
-    return any(
-        normalized == major or normalized.startswith(major + " ")
-        for major in MAJOR_TRANSIT_STOPS
-    )
-
 
 @st.cache_data
 def get_route_color_maps():
@@ -595,40 +579,6 @@ def _offset_polyline(lons, lats, offset_deg):
     return new_lons, new_lats
 
 
-def _octilinear_path(lons, lats):
-    """Build a schematic path using horizontal, vertical, and diagonal legs."""
-    if len(lons) < 2:
-        return list(lons), list(lats)
-
-    path_lons = [lons[0]]
-    path_lats = [lats[0]]
-    for index in range(1, len(lons)):
-        start_lon, start_lat = lons[index - 1], lats[index - 1]
-        end_lon, end_lat = lons[index], lats[index]
-        dx = end_lon - start_lon
-        dy = end_lat - start_lat
-
-        if not dx or not dy:
-            path_lons.append(end_lon)
-            path_lats.append(end_lat)
-            continue
-
-        diagonal = min(abs(dx), abs(dy))
-        diagonal_lon = start_lon + math.copysign(diagonal, dx)
-        diagonal_lat = start_lat + math.copysign(diagonal, dy)
-        path_lons.append(diagonal_lon)
-        path_lats.append(diagonal_lat)
-
-        if diagonal_lon != end_lon:
-            path_lons.append(end_lon)
-            path_lats.append(diagonal_lat)
-        elif diagonal_lat != end_lat:
-            path_lons.append(diagonal_lon)
-            path_lats.append(end_lat)
-
-    return path_lons, path_lats
-
-
 def build_transit_map(selected_routes, route_color_map, route_name_map,
                       route_agency_map=None,
                       title_text="Transit Map of Kathmandu Valley",
@@ -636,46 +586,49 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                       route_spacing=1.0,
                       label_density="Every other stop",
                       show_stop_markers=True,
-                      schematic=False,
-                      hidden_label_names=(),
-                      nearby_label_distance_m=220,
-                      suppress_nearby_labels=True):
-    """Build a clean, schematic-style transit map.
+                      hidden_label_names=()):
+    """Build the Plotly transit map with automatic label decluttering.
 
-    Label rules:
-      * normal stops use small, unboxed diagonal side labels;
-      * terminals and interchanges get priority and slightly larger text;
-      * labels are collision-tested in screen space;
-      * labels close to a terminal/interchange can be suppressed;
-      * the same physical stop used by multiple routes is rendered once as a
-        common interchange symbol and receives one label;
-      * route lines remain visible even when their labels are suppressed.
+    The important change here is that labels are treated as screen-space
+    objects rather than being separated only by geographic distance.
+    Interchanges/terminals are placed first, then ordinary stop labels are
+    placed around them using many possible positions.  If a label cannot be
+    placed cleanly, the route and stop marker remain visible and the name is
+    still available in hover.
     """
     fig = go.Figure()
 
     route_data = {}
     map_lons, map_lats = [], []
+    stop_routes = {}
 
     # ------------------------------------------------------------
-    # LOAD ORDERED STOPS
+    # LOAD ROUTE STOP SEQUENCES ONCE
     # ------------------------------------------------------------
     for route_id in selected_routes:
         ordered = route_stops_ordered(route_id)
         if ordered.empty:
             continue
+
         ordered = ordered.copy()
         ordered["stop_lat"] = pd.to_numeric(ordered["stop_lat"], errors="coerce")
         ordered["stop_lon"] = pd.to_numeric(ordered["stop_lon"], errors="coerce")
-        ordered["stop_sequence"] = pd.to_numeric(
-            ordered["stop_sequence"], errors="coerce"
-        )
         ordered = ordered.dropna(subset=["stop_lat", "stop_lon"])
         if ordered.empty:
             continue
-        ordered = ordered.sort_values("stop_sequence")
+
         route_data[route_id] = ordered
         map_lons.extend(ordered["stop_lon"].tolist())
         map_lats.extend(ordered["stop_lat"].tolist())
+
+        for _, row in ordered.iterrows():
+            name = "" if pd.isna(row["stop_name"]) else str(row["stop_name"]).strip()
+            key = (
+                name.casefold(),
+                round(float(row["stop_lat"]), 6),
+                round(float(row["stop_lon"]), 6),
+            )
+            stop_routes.setdefault(key, []).append(route_id)
 
     if not route_data:
         fig.add_annotation(
@@ -686,33 +639,33 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         )
         return fig
 
-    lon_min, lon_max = min(map_lons), max(map_lons)
-    lat_min, lat_max = min(map_lats), max(map_lats)
-    lat_mid = (lat_min + lat_max) / 2.0
+    for key in stop_routes:
+        stop_routes[key] = list(dict.fromkeys(stop_routes[key]))
 
-    bbox_diag = max(
-        math.hypot(lon_max - lon_min, lat_max - lat_min), 0.01
+    shared_stops = {k for k, routes in stop_routes.items() if len(routes) > 1}
+
+    bbox_diag = math.hypot(
+        max(map_lons) - min(map_lons),
+        max(map_lats) - min(map_lats),
     )
-    route_offset_unit = bbox_diag * 0.010 * route_spacing
+    bbox_diag = max(bbox_diag, 0.01)
 
-    # ------------------------------------------------------------
-    # NAME NORMALISATION
-    # ------------------------------------------------------------
-    def stop_label_name(stop_name):
-        text = "" if pd.isna(stop_name) else str(stop_name).strip()
+    # Keep parallel routes visually separated without moving them too far.
+    route_offset_unit = bbox_diag * 0.006 * route_spacing
+
+    def format_stop_name(stop_name, max_chars=18):
+        """Wrap long stop names so they do not create very wide labels."""
+        if pd.isna(stop_name):
+            return ""
+        text = str(stop_name).strip()
         if not text:
             return ""
-        # Treat "Gaushala 1", "Gaushala 2", etc. as one display name.
-        text = re.sub(r"\s+[0-9]+\s*$", "", text).strip()
-        return text
 
-    def format_stop_name(stop_name, max_chars=20):
-        text = stop_label_name(stop_name)
-        if not text:
-            return ""
         words = text.split()
-        lines, current = [], ""
+        lines = []
+        current = ""
         for word in words:
+            # Break extremely long single words as a last resort.
             if len(word) > max_chars:
                 if current:
                     lines.append(current)
@@ -729,9 +682,15 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             else:
                 lines.append(current)
                 current = word
+
         if current:
             lines.append(current)
         return "<br>".join(lines)
+
+    def stop_label_name(stop_name):
+        """Group numbered variants such as 'Gaushala 1' and 'Gaushala 2'."""
+        text = "" if pd.isna(stop_name) else str(stop_name).strip()
+        return re.sub(r"\s+\d+\s*$", "", text).strip() or text
 
     hidden_label_keys = {
         str(name).strip().casefold()
@@ -740,62 +699,207 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
     }
 
     # ------------------------------------------------------------
-    # BUILD PHYSICAL STOP GROUPS
+    # SCREEN-SPACE LABEL COLLISION ENGINE
     # ------------------------------------------------------------
-    # GTFS feeds sometimes contain the same stop with slightly different
-    # coordinates or numbered names. Group same-name stops within 80 m.
-    stop_groups = []
+    # These are estimates for a normal Streamlit/Plotly desktop viewport.
+    # Unlike the old geographic-distance test, this lets long labels and
+    # short labels compete using the same visual coordinate system.
+    plot_width_px = 980
+    plot_height_px = 680
+    label_lon_min, label_lon_max = min(map_lons), max(map_lons)
+    label_lat_min, label_lat_max = min(map_lats), max(map_lats)
 
-    def local_xy(lon, lat):
-        # metres, good enough for local Kathmandu-area screen/layout tests
-        x = (lon - lon_min) * 111320.0 * math.cos(math.radians(lat_mid))
-        y = (lat - lat_min) * 110540.0
-        return x, y
+    def label_width_chars(label):
+        return max((len(line) for line in label.split("<br>")), default=0)
 
-    def distance_m(lon1, lat1, lon2, lat2):
-        x1, y1 = local_xy(lon1, lat1)
-        x2, y2 = local_xy(lon2, lat2)
-        return math.hypot(x2 - x1, y2 - y1)
+    def label_box(label, x, y, xshift, yshift, xanchor, yanchor, font_size=10):
+        x_range = max(label_lon_max - label_lon_min, 1e-9)
+        y_range = max(label_lat_max - label_lat_min, 1e-9)
 
-    for route_id, ordered in route_data.items():
-        for idx, row in ordered.reset_index(drop=True).iterrows():
-            raw_name = "" if pd.isna(row["stop_name"]) else str(row["stop_name"]).strip()
-            base_name = stop_label_name(raw_name)
-            if not base_name:
-                continue
-            lon = float(row["stop_lon"])
-            lat = float(row["stop_lat"])
+        anchor_x = (x - label_lon_min) / x_range * plot_width_px + xshift
+        anchor_y = (label_lat_max - y) / y_range * plot_height_px - yshift
 
-            chosen = None
-            for gi, group in enumerate(stop_groups):
-                if group["name_key"] != base_name.casefold():
-                    continue
-                if distance_m(lon, lat, group["lon"], group["lat"]) <= 80.0:
-                    chosen = gi
-                    break
+        # Arial/Plotly text is approximately 6.5 px per character at 10 px.
+        width = max(label_width_chars(label) * (font_size * 0.62), 28) + 10
+        height = max(len(label.split("<br>")) * (font_size + 4), font_size + 4) + 8
 
-            if chosen is None:
-                stop_groups.append({
-                    "name": base_name,
-                    "name_key": base_name.casefold(),
-                    "lon": lon,
-                    "lat": lat,
-                    "routes": set(),
-                    "instances": [],
-                    "positions": {},
-                })
-                chosen = len(stop_groups) - 1
+        if xanchor == "right":
+            left = anchor_x - width
+        elif xanchor == "center":
+            left = anchor_x - width / 2
+        else:
+            left = anchor_x
 
-            group = stop_groups[chosen]
-            group["routes"].add(route_id)
-            group["instances"].append((route_id, idx))
-            group["positions"][route_id] = (lon, lat, idx)
+        if yanchor == "top":
+            top = anchor_y
+        elif yanchor == "middle":
+            top = anchor_y - height / 2
+        else:
+            top = anchor_y - height
 
-    # Physical interchange = same stop used by >=2 selected routes.
-    shared_groups = [g for g in stop_groups if len(g["routes"]) > 1]
+        return left, top, left + width, top + height
+
+    # Candidate positions are SIDE placements only: every candidate has a
+    # substantial horizontal offset so the leader line always goes left or
+    # right of the stop, never straight up/down across the route lines
+    # (vertical leaders were criss-crossing and attaching names to the
+    # wrong stop). Pairs are ordered near -> far; farther candidates are
+    # only used when the nearby ones are occupied.
+    label_positions = [
+        # PURELY HORIZONTAL leaders only: every candidate has yshift = 0 so
+        # the leader line goes straight left or straight right of the stop.
+        # Two horizontal leaders can never cross each other, which is what
+        # caused the Jaybageshwori / Gaushala criss-cross before. When a
+        # nearby slot is taken, the label simply moves farther out on the
+        # same side (or the collision engine picks the other side).
+        (48, 0, "left", "middle"),
+        (-48, 0, "right", "middle"),
+        (70, 0, "left", "middle"),
+        (-70, 0, "right", "middle"),
+        (95, 0, "left", "middle"),
+        (-95, 0, "right", "middle"),
+        (125, 0, "left", "middle"),
+        (-125, 0, "right", "middle"),
+        (160, 0, "left", "middle"),
+        (-160, 0, "right", "middle"),
+    ]
+
+    occupied_label_boxes = []
+    placed_leader_lines = []  # ((x1,y1),(x2,y2)) of already-placed leaders
+    label_counter = 0
+
+    def _segments_cross(seg_a, seg_b):
+        """True if two line segments properly intersect."""
+        def cross(o, a, b):
+            return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+        def is_point_on_seg(p, q, r):
+            return (min(p[0], r[0]) <= q[0] <= max(p[0], r[0])
+                    and min(p[1], r[1]) <= q[1] <= max(p[1], r[1]))
+
+        p1, p2 = seg_a
+        q1, q2 = seg_b
+        d1 = cross(q1, q2, p1)
+        d2 = cross(q1, q2, p2)
+        d3 = cross(p1, p2, q1)
+        d4 = cross(p1, p2, q2)
+        if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)):
+            return True
+        return False
+
+    def leader_crosses_existing(anchor_x, anchor_y, end_x, end_y, min_angle_diff=20):
+        """True if this leader line crosses any placed leader, or approaches
+        one at nearly the same angle near the anchor (which makes two labels
+        look ambiguous about which stop they belong to)."""
+        for (q1, q2) in placed_leader_lines:
+            if _segments_cross(((anchor_x, anchor_y), (end_x, end_y)), (q1, q2)):
+                return True
+
+            # Same-side leaders with opposite vertical offsets criss-cross
+            # visually: reject candidates whose leader direction from the
+            # anchor is too close to an existing leader that starts at a
+            # nearby stop.
+            a1 = math.atan2(end_y - anchor_y, end_x - anchor_x)
+            a2 = math.atan2(q2[1] - q1[1], q2[0] - q1[0])
+            diff = abs(math.degrees(a1 - a2)) % 180.0
+            diff = min(diff, 180.0 - diff)
+            if diff < min_angle_diff:
+                # Same direction; only a problem if the anchors are close
+                # (two labels fanned from nearly the same point).
+                if math.hypot(anchor_x - q1[0], anchor_y - q1[1]) < 90:
+                    return True
+        return False
+
+    def choose_label_position(label, x, y, font_size=10, extra_gap=7):
+        """Return a collision-free annotation position, or None."""
+        nonlocal label_counter
+
+        # Try every candidate, starting at a rotating position so labels do
+        # not all choose the same side in a dense corridor.
+        for attempt in range(len(label_positions)):
+            position_index = (label_counter + attempt) % len(label_positions)
+            xshift, yshift, xanchor, yanchor = label_positions[position_index]
+
+            candidate = label_box(
+                label, x, y,
+                xshift, -yshift,
+                xanchor, yanchor,
+                font_size=font_size,
+            )
+
+            padded = (
+                candidate[0] - extra_gap,
+                candidate[1] - extra_gap,
+                candidate[2] + extra_gap,
+                candidate[3] + extra_gap,
+            )
+
+            collision = any(
+                padded[0] < box[2]
+                and box[0] < padded[2]
+                and padded[1] < box[3]
+                and box[1] < padded[3]
+                for box in occupied_label_boxes
+            )
+
+            if not collision:
+                # All leaders are purely horizontal now, so two leaders can
+                # never criss-cross -- the box collision test above is the
+                # only guard needed. (The old angle-based leader check had
+                # to be removed: with horizontal-only leaders every leader
+                # has the same angle, so it rejected nearly every candidate
+                # and dropped most stop labels from the map.)
+                label_counter = position_index + 1
+                occupied_label_boxes.append(padded)
+                return xshift, yshift, xanchor, yanchor
+
+        return None
+
+    def add_stop_label(label, x, y, font_size=10, arrow_color="#777777"):
+        """Add one collision-free label and return whether it was placed."""
+        if not label:
+            return False
+
+        position = choose_label_position(
+            label, x, y, font_size=font_size, extra_gap=8
+        )
+        if position is None:
+            return False
+
+        xshift, yshift, xanchor, yanchor = position
+        fig.add_annotation(
+            x=x,
+            y=y,
+            xref="x",
+            yref="y",
+            text=label,
+            showarrow=True,
+            arrowhead=0,
+            arrowsize=0.5,
+            arrowwidth=0.8,
+            arrowcolor=arrow_color,
+            ax=xshift,
+            ay=-yshift,
+            xanchor=xanchor,
+            yanchor=yanchor,
+            align=(
+                "left" if xanchor == "left"
+                else "right" if xanchor == "right"
+                else "center"
+            ),
+            bgcolor="rgba(255,255,255,0.82)",
+            borderwidth=0,
+            borderpad=2,
+            font=dict(
+                size=font_size,
+                color="#111111",
+                family="Arial, sans-serif",
+            ),
+        )
+        return True
 
     # ------------------------------------------------------------
-    # ROUTE DRAWING
+    # DRAW ROUTES + STOP MARKERS
     # ------------------------------------------------------------
     n_routes = max(len(route_data), 1)
     draw_cache = {}
@@ -813,7 +917,9 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         )
         if first_agency_route:
             fig.add_trace(go.Scatter(
-                x=[None], y=[None], mode="markers",
+                x=[None],
+                y=[None],
+                mode="markers",
                 marker=dict(size=1, color="rgba(0,0,0,0)"),
                 name=f"<b>{html.escape(str(agency_label))}</b>",
                 legendgroup=agency_group,
@@ -821,8 +927,8 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                 uid=f"agency-{route_id}",
             ))
 
-        lons = ordered["stop_lon"].astype(float).tolist()
-        lats = ordered["stop_lat"].astype(float).tolist()
+        lons = ordered["stop_lon"].tolist()
+        lats = ordered["stop_lat"].tolist()
 
         if separate_overlapping_routes and n_routes > 1:
             offset_deg = route_offset_unit * (
@@ -834,15 +940,12 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
 
         draw_cache[route_id] = (draw_lons, draw_lats)
 
-        line_lons, line_lats = draw_lons, draw_lats
-        if schematic:
-            line_lons, line_lats = _octilinear_path(draw_lons, draw_lats)
-
+        # Route line.
         fig.add_trace(go.Scatter(
-            x=line_lons,
-            y=line_lats,
+            x=draw_lons,
+            y=draw_lats,
             mode="lines",
-            line=dict(color=color, width=5.5, shape="linear"),
+            line=dict(color=color, width=5.0),
             name=route_label,
             hoverinfo="skip",
             legendgroup=agency_group,
@@ -850,293 +953,298 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             cliponaxis=False,
         ))
 
-        if show_stop_markers:
-            fig.add_trace(go.Scatter(
-                x=draw_lons,
-                y=draw_lats,
-                mode="markers",
-                marker=dict(
-                    size=7,
-                    color="#ffffff",
-                    line=dict(color=color, width=2),
-                ),
-                customdata=ordered["stop_name"].fillna("").astype(str).tolist(),
-                hovertemplate="%{customdata}<extra></extra>",
-                name=f"Stops — {route_label}",
-                legendgroup=agency_group,
-                showlegend=False,
-                uid=f"stops-{route_id}",
-                cliponaxis=False,
-            ))
+        # IMPORTANT: route lines may be visually offset to separate overlapping
+        # corridors, but STOP MARKERS stay on the ORIGINAL GTFS coordinates.
+        # This makes it immediately clear where the real bus stop is.
+        marker_size = 8 if show_stop_markers else 9
+        marker_color = "white" if show_stop_markers else "rgba(0,0,0,0)"
+        marker_line_width = 2.5 if show_stop_markers else 0
 
-    # ------------------------------------------------------------
-    # COMMON INTERCHANGE SYMBOLS
-    # ------------------------------------------------------------
-    # One common physical symbol, with concentric route-colour rings.
-    for gi, group in enumerate(shared_groups):
-        lon, lat = group["lon"], group["lat"]
-        route_ids = list(group["routes"])
+        hover_names = [
+            "" if pd.isna(v) else str(v).strip()
+            for v in ordered["stop_name"]
+        ]
+        hover_sequences = ordered["stop_sequence"].tolist()
 
         fig.add_trace(go.Scatter(
-            x=[lon], y=[lat], mode="markers",
+            # Use ORIGINAL stop coordinates, not the offset route coordinates.
+            x=lons,
+            y=lats,
+            mode="markers",
             marker=dict(
-                size=19,
-                symbol="circle",
-                color="#ffffff",
-                line=dict(color="#111111", width=1.5),
+                size=marker_size,
+                color=marker_color,
+                line=dict(color=color, width=marker_line_width),
             ),
-            hoverinfo="skip", showlegend=False,
-            uid=f"shared-base-{gi}",
+            text=hover_names,
+            customdata=hover_sequences,
+            hovertemplate=(
+                "<b>%{text}</b><br>"
+                "Route: " + html.escape(str(route_label)) +
+                "<br>Stop sequence: %{customdata}<extra></extra>"
+            ),
+            showlegend=False,
+            legendgroup=agency_group,
+            cliponaxis=False,
+            uid=f"stops-{route_id}",
         ))
 
-        # Concentric coloured rings make the shared stop visually belong to
-        # every route without drawing multiple duplicate labels.
-        ring_sizes = [16, 13, 10, 8]
-        for ri, rid in enumerate(route_ids[:4]):
-            base_color = route_color_map.get(rid, "blue")
-            color = ROUTE_COLOR_HEX.get(base_color, base_color)
-            fig.add_trace(go.Scatter(
-                x=[lon], y=[lat], mode="markers",
-                marker=dict(
-                    size=ring_sizes[ri],
-                    symbol="circle-open",
-                    color=color,
-                    line=dict(color=color, width=2.2),
-                ),
-                hoverinfo="skip", showlegend=False,
-                uid=f"shared-ring-{gi}-{ri}",
-            ))
-
     # ------------------------------------------------------------
-    # LABEL COLLISION ENGINE
+    # DRAW SHARED / INTERCHANGE CONNECTORS AND MARKERS
     # ------------------------------------------------------------
-    # Use a generous logical viewport so labels remain safe when the user
-    # expands Plotly to fullscreen. The final layout also has extra margins.
-    plot_width_px = 1450
-    plot_height_px = 820
-    occupied_label_boxes = []
+    shared_records = []
 
-    def label_width_chars(label):
-        return max((len(line) for line in label.split("<br>")), default=0)
+    for shared_key in shared_stops:
+        name_key, lat, lon = shared_key
+        routes_here = stop_routes[shared_key]
+        if not routes_here:
+            continue
 
-    def label_box(label, x, y, xshift, yshift, xanchor, yanchor, font_size):
-        x_range = max(lon_max - lon_min, 1e-9)
-        y_range = max(lat_max - lat_min, 1e-9)
-        anchor_x = (x - lon_min) / x_range * plot_width_px + xshift
-        anchor_y = (lat_max - y) / y_range * plot_height_px - yshift
-        width = max(label_width_chars(label) * (font_size * 0.60), 30) + 14
-        height = max(len(label.split("<br>")) * (font_size + 4), font_size + 5) + 8
-
-        if xanchor == "right":
-            left = anchor_x - width
-        elif xanchor == "center":
-            left = anchor_x - width / 2
-        else:
-            left = anchor_x
-
-        if yanchor == "top":
-            top = anchor_y
-        elif yanchor == "middle":
-            top = anchor_y - height / 2
-        else:
-            top = anchor_y - height
-        return left, top, left + width, top + height
-
-    # 8 clean directions. No leader lines: the diagonal displacement itself
-    # tells the eye which stop owns the label.
-    label_positions = [
-        (30, 18, "left", "middle"),
-        (30, -18, "left", "middle"),
-        (-30, 18, "right", "middle"),
-        (-30, -18, "right", "middle"),
-        (44, 28, "left", "middle"),
-        (44, -28, "left", "middle"),
-        (-44, 28, "right", "middle"),
-        (-44, -28, "right", "middle"),
-    ]
-
-    def overlaps(a, b, gap=5):
-        return (
-            a[0] - gap < b[2]
-            and b[0] - gap < a[2]
-            and a[1] - gap < b[3]
-            and b[1] - gap < a[3]
-        )
-
-    def choose_label_position(label, x, y, font_size=10, preferred=None):
-        order = list(range(len(label_positions)))
-        if preferred is not None:
-            # Put route-aware preferred candidates first.
-            order = preferred + [i for i in order if i not in preferred]
-
-        for pos_idx in order:
-            xshift, yshift, xanchor, yanchor = label_positions[pos_idx]
-            box = label_box(
-                label, x, y, xshift, yshift,
-                xanchor, yanchor, font_size
-            )
-            padded = (box[0] - 5, box[1] - 5, box[2] + 5, box[3] + 5)
-            if not any(overlaps(padded, old) for old in occupied_label_boxes):
-                occupied_label_boxes.append(padded)
-                return label_positions[pos_idx]
-        return None
-
-    def preferred_positions_for_stop(route_id, idx):
-        """Prefer the side perpendicular to the local route direction."""
-        ordered = route_data[route_id]
-        n = len(ordered)
-        if n < 2:
-            return [0, 1, 2, 3]
-
-        i = max(0, min(int(idx), n - 1))
-        if i == 0:
-            dx = float(ordered.iloc[1]["stop_lon"]) - float(ordered.iloc[0]["stop_lon"])
-            dy = float(ordered.iloc[1]["stop_lat"]) - float(ordered.iloc[0]["stop_lat"])
-        elif i == n - 1:
-            dx = float(ordered.iloc[-1]["stop_lon"]) - float(ordered.iloc[-2]["stop_lon"])
-            dy = float(ordered.iloc[-1]["stop_lat"]) - float(ordered.iloc[-2]["stop_lat"])
-        else:
-            dx = float(ordered.iloc[i + 1]["stop_lon"]) - float(ordered.iloc[i - 1]["stop_lon"])
-            dy = float(ordered.iloc[i + 1]["stop_lat"]) - float(ordered.iloc[i - 1]["stop_lat"])
-
-        # Route direction -> choose a perpendicular side. This makes labels
-        # consistently sit beside the route rather than inside it.
-        if abs(dx) >= abs(dy):
-            return [0, 1, 2, 3] if dy >= 0 else [1, 0, 3, 2]
-        return [2, 0, 3, 1] if dx >= 0 else [0, 2, 1, 3]
-
-    # ------------------------------------------------------------
-    # DECIDE WHICH LABELS ARE ELIGIBLE
-    # ------------------------------------------------------------
-    group_candidates = []
-    for gi, group in enumerate(stop_groups):
-        routes = list(group["routes"])
-        shared = len(routes) > 1
-        major = is_major_transit_stop(group["name"])
-
-        terminal = False
-        terminal_route = None
-        terminal_idx = None
-        for rid in routes:
+        shared_name = name_key
+        for rid in routes_here:
             ordered = route_data[rid]
-            if not ordered.empty:
-                first_name = stop_label_name(ordered.iloc[0]["stop_name"]).casefold()
-                last_name = stop_label_name(ordered.iloc[-1]["stop_name"]).casefold()
-                if group["name"].casefold() in {first_name, last_name}:
-                    terminal = True
-                    terminal_route = rid
-                    # Find nearest sequence index for placement preference.
-                    terminal_idx = min(
-                        group["positions"].get(rid, (group["lon"], group["lat"], 0))[2],
-                        len(ordered) - 1,
-                    )
+            for _, row in ordered.iterrows():
+                candidate = (
+                    "" if pd.isna(row["stop_name"])
+                    else str(row["stop_name"]).strip()
+                )
+                if candidate.casefold() == name_key:
+                    shared_name = candidate
+                    break
+            if shared_name != name_key:
+                break
+
+        label_name = stop_label_name(shared_name)
+        if label_name.casefold() in hidden_label_keys:
+            continue
+
+        # Connect each offset route copy back to the true shared stop.
+        for rid in routes_here:
+            draw_lons, draw_lats = draw_cache[rid]
+            ordered = route_data[rid]
+            found = None
+            for i, (_, row) in enumerate(ordered.iterrows()):
+                candidate_key = (
+                    (
+                        "" if pd.isna(row["stop_name"])
+                        else str(row["stop_name"]).strip()
+                    ).casefold(),
+                    round(float(row["stop_lat"]), 6),
+                    round(float(row["stop_lon"]), 6),
+                )
+                if candidate_key == shared_key:
+                    found = i
                     break
 
-        priority = 0 if (shared or major) else 1 if terminal else 2
-        group_candidates.append({
-            "gi": gi,
-            "group": group,
-            "shared": shared,
-            "major": major,
-            "terminal": terminal,
-            "priority": priority,
-            "route_id": terminal_route or routes[0],
-            "idx": terminal_idx if terminal_idx is not None else 0,
-        })
-
-    # Keep the most important labels first so they always win collisions.
-    group_candidates.sort(key=lambda c: (c["priority"], c["group"]["name"].casefold()))
-
-    # Label spacing suppression around important stops.
-    important_groups = [
-        c["group"] for c in group_candidates
-        if c["shared"] or c["major"] or c["terminal"]
-    ]
-
-    def near_important(group):
-        if not suppress_nearby_labels:
-            return False
-        if group in important_groups:
-            return False
-        return any(
-            distance_m(group["lon"], group["lat"], other["lon"], other["lat"])
-            < float(nearby_label_distance_m)
-            for other in important_groups
-        )
-
-    # Density selection uses unique physical stops, not route instances.
-    ordinary_counter = 0
-    placed_label_names = set()
-
-    for candidate in group_candidates:
-        group = candidate["group"]
-        name = group["name"]
-        name_key = name.casefold()
-        if not name or name_key in hidden_label_keys:
-            continue
-        if name_key in placed_label_names:
-            continue
-
-        shared = candidate["shared"]
-        major = candidate["major"]
-        terminal = candidate["terminal"]
-
-        if label_density == "Major exchanges only" and not (major or shared):
-            continue
-        if label_density == "Terminals & interchanges only" and not (terminal or shared or major):
-            continue
-        if label_density == "Every other stop" and not (shared or major or terminal):
-            ordinary_counter += 1
-            if ordinary_counter % 2 == 0:
+            if found is None:
                 continue
-        if suppress_nearby_labels and near_important(group):
-            continue
 
-        # Shared/terminal/major labels are prominent; ordinary labels stay light.
-        font_size = 11.5 if (shared or major) else 11 if terminal else 9.5
-        font_weight = "bold" if (shared or major or terminal) else "normal"
-        label = format_stop_name(name)
+            color = ROUTE_COLOR_HEX.get(
+                route_color_map.get(rid, "blue"),
+                route_color_map.get(rid, "#1d4ed8"),
+            )
+            fig.add_trace(go.Scatter(
+                x=[draw_lons[found], lon],
+                y=[draw_lats[found], lat],
+                mode="lines",
+                line=dict(color=color, width=2, dash="dot"),
+                hoverinfo="skip",
+                showlegend=False,
+                cliponaxis=False,
+                uid=f"shared-connector-{rid}-{name_key}",
+            ))
 
-        rid = candidate["route_id"]
-        idx = candidate["idx"]
-        preferred = preferred_positions_for_stop(rid, idx) if rid in route_data else None
-        position = choose_label_position(
-            label, group["lon"], group["lat"],
-            font_size=font_size,
-            preferred=preferred,
-        )
-        if position is None:
-            continue
+        # Central interchange marker.
+        fig.add_trace(go.Scatter(
+            x=[lon],
+            y=[lat],
+            mode="markers",
+            marker=dict(
+                size=14,
+                color="white",
+                line=dict(color="#111111", width=2.5),
+            ),
+            hovertext=[shared_name],
+            hovertemplate=(
+                "<b>%{hovertext}</b><br>Shared by "
+                + str(len(routes_here))
+                + " routes<extra></extra>"
+            ),
+            showlegend=False,
+            cliponaxis=False,
+            uid=f"shared-center-{name_key}",
+        ))
 
-        xshift, yshift, xanchor, yanchor = position
-        fig.add_annotation(
-            x=group["lon"],
-            y=group["lat"],
+        # Small route-colored indicators.
+        dot_offsets = [-8, 0, 8]
+        for j, rid in enumerate(routes_here[:3]):
+            color = ROUTE_COLOR_HEX.get(
+                route_color_map.get(rid, "blue"),
+                "#1d4ed8",
+            )
+            fig.add_annotation(
+                x=lon,
+                y=lat,
+                xref="x",
+                yref="y",
+                text="●",
+                showarrow=False,
+                xshift=dot_offsets[j],
+                yshift=13,
+                font=dict(size=9, color=color),
+                bgcolor="rgba(255,255,255,0.0)",
+                borderwidth=0,
+                borderpad=0,
+            )
+
+        # Oval around the interchange.
+        oval_w = max(bbox_diag * 0.010, 0.0018)
+        oval_h = max(bbox_diag * 0.006, 0.0011)
+        fig.add_shape(
+            type="circle",
             xref="x",
             yref="y",
-            text=label,
-            showarrow=False,
-            xshift=xshift,
-            yshift=yshift,
-            xanchor=xanchor,
-            yanchor=yanchor,
-            align="left" if xanchor == "left" else "right",
-            bgcolor="rgba(255,255,255,0)",
-            borderwidth=0,
-            borderpad=0,
-            font=dict(
-                size=font_size,
-                color="#111111",
-                family="Arial, sans-serif",
-            ),
+            x0=lon - oval_w,
+            x1=lon + oval_w,
+            y0=lat - oval_h,
+            y1=lat + oval_h,
+            line=dict(color="#222222", width=2),
+            fillcolor="rgba(255,255,255,0.18)",
+            layer="above",
         )
-        placed_label_names.add(name_key)
+
+        shared_records.append({
+            "name": label_name,
+            "lat": lat,
+            "lon": lon,
+            "routes": routes_here,
+        })
 
     # ------------------------------------------------------------
-    # CLEAN LEGEND + RESPONSIVE FULLSCREEN LAYOUT
+    # BUILD LABEL CANDIDATES
     # ------------------------------------------------------------
-    lon_padding = max((lon_max - lon_min) * 0.26, 0.008)
-    lat_padding = max((lat_max - lat_min) * 0.26, 0.008)
+    # Important labels are processed first.  This prevents a dense cluster of
+    # ordinary stops from taking the only good positions around an interchange.
+    label_candidates = []
+    seen_candidate_keys = set()
+
+    # Interchanges have the highest priority.
+    for record in shared_records:
+        key = (
+            "shared",
+            record["name"].casefold(),
+            round(record["lat"], 6),
+            round(record["lon"], 6),
+        )
+        if key in seen_candidate_keys:
+            continue
+        seen_candidate_keys.add(key)
+        label_candidates.append({
+            "priority": 0,
+            "name": record["name"],
+            "lat": record["lat"],
+            "lon": record["lon"],
+            "font_size": 11,
+        })
+
+    # Collect terminal and ordinary stops.
+    for route_id, ordered in route_data.items():
+        draw_lons, draw_lats = draw_cache[route_id]
+        last_index = len(ordered) - 1
+
+        for index, (_, stop_row) in enumerate(ordered.iterrows()):
+            stop_name = (
+                "" if pd.isna(stop_row["stop_name"])
+                else str(stop_row["stop_name"]).strip()
+            )
+            stop_lat = float(stop_row["stop_lat"])
+            stop_lon = float(stop_row["stop_lon"])
+            stop_key = (
+                stop_name.casefold(),
+                round(stop_lat, 6),
+                round(stop_lon, 6),
+            )
+
+            if stop_key in shared_stops:
+                continue
+
+            label_name = stop_label_name(stop_name)
+            if not label_name or label_name.casefold() in hidden_label_keys:
+                continue
+
+            is_terminal = index == 0 or index == last_index
+
+            if label_density == "Terminals & interchanges only" and not is_terminal:
+                continue
+
+            if label_density == "Every other stop" and not is_terminal and index % 2 == 1:
+                continue
+
+            # IMPORTANT: label anchor must use the ORIGINAL GTFS stop
+            # coordinate.  The route line may be visually offset for
+            # overlapping routes, but the stop name must never be attached
+            # to that offset line.  Otherwise the coloured route stroke can
+            # run through/behind the name and make the actual stop hard to
+            # identify.
+            label_candidates.append({
+                "priority": 1 if is_terminal else 2,
+                "name": label_name,
+                "lat": stop_lat,
+                "lon": stop_lon,
+                "font_size": 11 if is_terminal else 10,
+                "base_lat": stop_lat,
+                "base_lon": stop_lon,
+            })
+
+    # GLOBAL name deduplication: only ONE label per base stop name on the
+    # whole map. Numbered variants such as 'Kalanki 1' and 'Kalanki 2' both
+    # resolve to base name 'Kalanki' (via stop_label_name), so the very first
+    # occurrence (terminals/interchanges were queued first, so those win)
+    # gets the label and every later occurrence is dropped.
+    deduped_candidates = []
+    seen_base_names = set()
+    for candidate in label_candidates:
+        name_key = candidate["name"].casefold()
+        if name_key in seen_base_names:
+            continue
+        seen_base_names.add(name_key)
+        deduped_candidates.append(candidate)
+
+    # Highest priority first; among ordinary stops, preserve route order.
+    deduped_candidates.sort(key=lambda item: item["priority"])
+
+    # ------------------------------------------------------------
+    # PLACE LABELS
+    # ------------------------------------------------------------
+    for candidate in deduped_candidates:
+        label = format_stop_name(candidate["name"])
+        if not label:
+            continue
+
+        # For all-stop maps, very long labels are slightly smaller.  Important
+        # labels remain larger and are always attempted first.
+        font_size = candidate.get("font_size", 10)
+        if label_width_chars(label) > 20 and font_size > 10:
+            font_size = 10
+
+        add_stop_label(
+            label,
+            candidate["lon"],
+            candidate["lat"],
+            font_size=font_size,
+            arrow_color="#666666" if candidate["priority"] < 2 else "#999999",
+        )
+
+    # ------------------------------------------------------------
+    # FINAL LAYOUT
+    # ------------------------------------------------------------
+    lon_min, lon_max = min(map_lons), max(map_lons)
+    lat_min, lat_max = min(map_lats), max(map_lats)
+
+    # More breathing room around the map gives the outside labels somewhere
+    # to go, especially when the user selects many routes.
+    lon_padding = max((lon_max - lon_min) * 0.28, 0.009)
+    lat_padding = max((lat_max - lat_min) * 0.28, 0.009)
 
     fig.update_layout(
         template="plotly_white",
@@ -1151,26 +1259,24 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         paper_bgcolor="#ffffff",
         font=dict(color="#111111"),
         legend=dict(
-            title=dict(text="Routes", font=dict(size=12)),
-            orientation="v",
-            bgcolor="rgba(255,255,255,0.96)",
-            bordercolor="rgba(0,0,0,0.12)",
-            borderwidth=1,
+            title="Routes",
+            orientation="h",
+            bgcolor="rgba(255,255,255,0)",
+            borderwidth=0,
             font=dict(color="#111111", size=11),
-            xref="paper", yref="paper",
-            x=1.015, y=1.0,
-            xanchor="left", yanchor="top",
-            tracegroupgap=5,
+            xref="paper",
+            yref="paper",
+            x=0.0,
+            y=-0.12,
+            xanchor="left",
+            yanchor="top",
         ),
         xaxis=dict(
             visible=False,
             range=[lon_min - lon_padding, lon_max + lon_padding],
-            scaleanchor="y",
-            scaleratio=0.89,
             fixedrange=False,
             showgrid=False,
             zeroline=False,
-            automargin=True,
         ),
         yaxis=dict(
             visible=False,
@@ -1178,11 +1284,10 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             fixedrange=False,
             showgrid=False,
             zeroline=False,
-            automargin=True,
         ),
         autosize=True,
-        height=900,
-        margin=dict(t=95, b=65, l=75, r=310),
+        height=860,
+        margin=dict(t=90, b=115, l=45, r=45),
         hovermode="closest",
         dragmode="pan",
         uirevision=",".join(sorted(selected_routes)),
@@ -3108,32 +3213,29 @@ with col_map1:
 
                 elif view_mode == "🚇 Transit Map":
 
-                    # ---- CLEAN TRANSIT-MAP CONTROLS --------------------
-                    tm_col1, tm_col2, tm_col3, tm_col4 = st.columns([1.35, 1.35, 1.1, 1.2])
+                    # ---- NEW: declutter controls -----------------------
+                    tm_col1, tm_col2, tm_col3 = st.columns([1.3, 1.3, 1])
                     with tm_col1:
                         tm_label_density = st.selectbox(
                             "Label density",
-                            [
-                                "Major exchanges only",
-                                "Terminals & interchanges only",
-                                "Every other stop",
-                                "All stops",
-                            ],
-                            index=2,
+                            ["Every other stop", "All stops", "Terminals & interchanges only"],
                             key="tm_label_density",
-                            help="Labels are placed once per physical stop. "
-                                 "Interchanges and terminals always get priority.",
+                            help="Thin out station-name labels on busy, "
+                                 "multi-route selections.",
                         )
                     with tm_col2:
                         tm_separate_routes = st.checkbox(
                             "Separate overlapping routes",
                             value=True,
                             key="tm_separate_routes",
-                            help="Fan selected routes apart when they overlap "
-                                 "so their stops remain visible.",
+                            help="Fans routes that share a corridor into "
+                                 "parallel lines instead of drawing them "
+                                 "on top of each other. Slightly shifts "
+                                 "lines/stops from their exact coordinates "
+                                 "for readability.",
                         )
                         tm_route_spacing = st.slider(
-                            "Route spacing", 0.5, 3.0, 1.0, 0.25,
+                            "Spacing", 0.5, 3.0, 1.0, 0.25,
                             key="tm_route_spacing",
                             disabled=not tm_separate_routes,
                         )
@@ -3142,26 +3244,6 @@ with col_map1:
                             "Show stop markers",
                             value=True,
                             key="tm_show_markers",
-                        )
-                        tm_schematic = st.checkbox(
-                            "Octilinear schematic",
-                            value=False,
-                            key="tm_schematic",
-                            help="Use clean horizontal, vertical and diagonal "
-                                 "route legs while keeping stop locations anchored.",
-                        )
-                    with tm_col4:
-                        tm_suppress_nearby = st.checkbox(
-                            "Hide nearby labels",
-                            value=True,
-                            key="tm_suppress_nearby",
-                            help="Hide ordinary stop names close to terminals "
-                                 "or interchanges to prevent label clusters.",
-                        )
-                        tm_nearby_distance = st.slider(
-                            "Nearby distance (m)", 100, 400, 220, 20,
-                            key="tm_nearby_distance",
-                            disabled=not tm_suppress_nearby,
                         )
 
                     label_options = sorted({
@@ -3189,10 +3271,7 @@ with col_map1:
                         route_spacing=tm_route_spacing,
                         label_density=tm_label_density,
                         show_stop_markers=tm_show_markers,
-                        schematic=tm_schematic,
                         hidden_label_names=tuple(tm_hidden_labels),
-                        nearby_label_distance_m=tm_nearby_distance,
-                        suppress_nearby_labels=tm_suppress_nearby,
                     )
 
                     st.plotly_chart(
@@ -3205,26 +3284,6 @@ with col_map1:
                             "displaylogo": False,
                         }
                     )
-
-                    try:
-                        full_map_png = fig_transit.to_image(
-                            format="png",
-                            width=2200,
-                            height=1500,
-                            scale=2,
-                        )
-                        st.download_button(
-                            "Download full Transit Map PNG",
-                            data=full_map_png,
-                            file_name="transit_map_full.png",
-                            mime="image/png",
-                            key="download_full_transit_map_png",
-                        )
-                    except Exception as export_error:
-                        st.warning(
-                            "Full-map PNG export is unavailable. "
-                            f"Install the image-export dependencies: {export_error}"
-                        )
 
                 else:  # LOOM Map (SVG)
 
