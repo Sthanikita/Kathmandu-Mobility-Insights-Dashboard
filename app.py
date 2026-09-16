@@ -1189,8 +1189,8 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         x=[None],
         y=[None],
         mode="markers",
-        marker=dict(size=9, color="rgba(0,0,0,0)"),
-        name="Symbols",
+        marker=dict(size=0, color="rgba(0,0,0,0)"),
+        name="<b>Symbols</b>",
         legendgroup="symbols",
         showlegend=True,
         hoverinfo="skip",
@@ -1259,7 +1259,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             borderwidth=1,
             font=dict(color="#111111", size=11),
             title=dict(
-                text="Routes",
+                text="<b>Routes</b>",
                 font=dict(size=12, color="#111111"),
                 side="top",
             ),
@@ -2385,10 +2385,7 @@ def generate_loom_svg(
     if octi_extra_args and octi_extra_args.strip():
         octi_cmd += f" {octi_extra_args.strip()}"
 
-    # Let transitmap handle station labels natively for BOTH modes, exactly
-    # like app.py: no --station-label-textsize override, then apply app.py's
-    # post-processing pipeline (font scaling, clip expansion, label
-    # separation) to the SVG.
+
     transitmap_cmd = (
         f"{loom_dir}/transitmap -l "
         f"--line-width {line_width} --line-spacing {line_spacing}"

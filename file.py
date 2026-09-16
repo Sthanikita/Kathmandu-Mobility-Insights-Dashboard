@@ -840,6 +840,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         route_label = route_name_map.get(route_id, route_id)
         agency_label = (route_agency_map or {}).get(route_id, "Unknown Agency")
         agency_group = f"agency-{agency_label}"
+        route_group = f"route-{route_id}"
 
         first_agency_route = not any(
             getattr(trace, "legendgroup", None) == agency_group for trace in fig.data
@@ -880,7 +881,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             line=dict(color=color, width=5.5),
             name=route_label,
             hoverinfo="skip",
-            legendgroup=agency_group,
+            legendgroup=route_group,
             uid=f"line-{route_id}",
             cliponaxis=False,
         ))
@@ -903,7 +904,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             hovertemplate="<b>%{hovertext}</b><br>Route: "
                           + html.escape(str(route_label)) + "<extra></extra>",
             showlegend=False,
-            legendgroup=agency_group,
+            legendgroup=route_group,
             cliponaxis=False,
             uid=f"stops-{route_id}",
         ))
@@ -965,22 +966,23 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                 continue
             xshift, yshift, xanchor, yanchor = position
 
-            fig.add_annotation(
-                x=draw_lons[index],
-                y=draw_lats[index],
-                xref="x", yref="y",
-                text=label,
-                showarrow=False,
-                xshift=xshift,
-                yshift=yshift,
-                xanchor=xanchor,
-                yanchor=yanchor,
-                align="left" if xanchor == "left" else "right" if xanchor == "right" else "center",
-                bgcolor="rgba(255,255,255,0)",
-                borderwidth=0,
-                borderpad=0,
-                font=dict(size=10, color="#111111", family="Arial, sans-serif"),
-            )
+            fig.add_trace(go.Scatter(
+                x=[draw_lons[index]],
+                y=[draw_lats[index]],
+                mode="text",
+                text=[label],
+                textposition=(
+                    "middle right" if xanchor == "left"
+                    else "middle left" if xanchor == "right"
+                    else "middle center"
+                ),
+                textfont=dict(size=10, color="#111111", family="Arial, sans-serif"),
+                hoverinfo="skip",
+                showlegend=False,
+                legendgroup=route_group,
+                cliponaxis=False,
+                uid=f"label-{route_id}-{index}",
+            ))
 
     # ------------------------------------------------------------
     # SHARED / INTERCHANGE STOPS
@@ -1052,6 +1054,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             hovertemplate="<b>%{hovertext}</b><br>Shared by "
                           + str(len(routes_here)) + " routes<extra></extra>",
             showlegend=False,
+                legendgroup=f"route-{routes_here[0]}",
             cliponaxis=False,
             uid=f"shared-center-{name_key}",
             ))
@@ -1065,18 +1068,18 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                 ),
                 bbox_diag * 0.004,
             )
-            fig.add_shape(
-                type="circle",
-                xref="x",
-                yref="y",
-                x0=lon - ring_radius,
-                x1=lon + ring_radius,
-                y0=lat - ring_radius,
-                y1=lat + ring_radius,
+            ring_angles = [2 * math.pi * index / 40 for index in range(41)]
+            fig.add_trace(go.Scatter(
+                x=[lon + ring_radius * math.cos(angle) for angle in ring_angles],
+                y=[lat + ring_radius * math.sin(angle) for angle in ring_angles],
+                mode="lines",
                 line=dict(color="#111111", width=2),
-                fillcolor="rgba(255,255,255,0.05)",
-                layer="above",
-            )
+                hoverinfo="skip",
+                showlegend=False,
+                legendgroup=f"route-{routes_here[0]}",
+                cliponaxis=False,
+                uid=f"shared-ring-{name_key}",
+            ))
 
         # One clean label for the interchange, horizontally beside the oval.
         # Use the base name (no trailing number) and skip it if a label for
@@ -1091,22 +1094,19 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         if shared_base_name.casefold() in seen_base_names:
             continue
         seen_base_names.add(shared_base_name.casefold())
-        fig.add_annotation(
-            x=lon, y=lat,
-            xref="x", yref="y",
-            text=format_stop_name(shared_base_name, max_chars=24),
-            showarrow=False,
-            xshift=24,
-            yshift=0,
-            xanchor="left",
-            yanchor="bottom",
-            align="left",
-            bgcolor="rgba(255,255,255,0.88)",
-            bordercolor="rgba(255,255,255,0.95)",
-            borderwidth=2,
-            borderpad=2,
-            font=dict(size=11, color="#111111", family="Arial, sans-serif"),
-        )
+        fig.add_trace(go.Scatter(
+            x=[lon],
+            y=[lat],
+            mode="text",
+            text=[format_stop_name(shared_base_name, max_chars=24)],
+            textposition="middle right",
+            textfont=dict(size=11, color="#111111", family="Arial, sans-serif"),
+            hoverinfo="skip",
+            showlegend=False,
+            legendgroup=f"route-{routes_here[0]}",
+            cliponaxis=False,
+            uid=f"shared-label-{name_key}",
+        ))
 
     # ------------------------------------------------------------
     # FINAL LAYOUT
@@ -1131,6 +1131,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         legend=dict(
             title="Routes",
             orientation="v",
+            groupclick="togglegroup",
             bgcolor="rgba(255,255,255,0.94)",
             bordercolor="rgba(0,0,0,0.12)",
             borderwidth=1,
