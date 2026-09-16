@@ -6,3 +6,7 @@ pandas
 sqlalchemy
 plotly
 psycopg2-binary
+# Pin kaleido to 0.2.x: kaleido v1+ passes a 'headers' argument that this
+# plotly version does not accept, which breaks fig.to_image() with
+# "Chromium.get_cli() received invalid args: dict_keys(['headers'])".
+kaleido==0.2.1

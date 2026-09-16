@@ -514,15 +514,35 @@ LIMIT 5;
 @st.cache_data
 def route_geom(route_id):
     engine = get_engine()
-    return pd.read_sql(f"""
-        SELECT ARRAY_AGG(ARRAY[shape_pt_lon, shape_pt_lat]) AS path
-        FROM shapes
-        WHERE shape_id IN (
+    df = pd.read_sql(f"""
+        SELECT s.shape_id, s.shape_pt_lat, s.shape_pt_lon, s.shape_pt_sequence
+        FROM shapes s
+        WHERE s.shape_id IN (
             SELECT DISTINCT shape_id
             FROM trips
             WHERE route_id = '{route_id}'
+            AND shape_id IS NOT NULL
         )
     """, engine)
+
+    if df.empty:
+        return pd.DataFrame(columns=["shape_id", "path"])
+
+    # Ensure shape_pt_sequence is sorted numerically
+    df["shape_pt_sequence"] = pd.to_numeric(df["shape_pt_sequence"], errors="coerce")
+    df = df.dropna(subset=["shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"])
+    df = df.sort_values(["shape_id", "shape_pt_sequence"])
+
+    records = []
+    for shape_id, group in df.groupby("shape_id"):
+        coords = [
+            [lon, lat]
+            for lon, lat in zip(group["shape_pt_lon"], group["shape_pt_lat"])
+        ]
+        if coords:
+            records.append({"shape_id": shape_id, "path": coords})
+
+    return pd.DataFrame(records)
 
 @st.cache_data
 def stops(route_id):
