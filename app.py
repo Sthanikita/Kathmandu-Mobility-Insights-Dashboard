@@ -13,6 +13,7 @@ import tempfile
 import zipfile
 import shutil
 import os
+import json
 import base64
 import html
 import shlex
@@ -20,6 +21,15 @@ import re
 import math
 import platform
 import xml.etree.ElementTree as ET
+
+# LOOM SVG post-processing re-serializes the document with ElementTree.
+# Without this registration ET writes tags as <ns0:svg>, <ns0:text>, ...
+# (an unbound, arbitrary prefix), which (a) breaks rendering in browsers
+# and (b) makes tag searches like rfind("</svg>") fail -- silently dropping
+# landmark injection and any other string-level SVG surgery.
+ET.register_namespace("", "http://www.w3.org/2000/svg")
+ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+
 st.set_page_config(layout="wide")
 
 pio.templates.default = "plotly_dark"
@@ -348,7 +358,9 @@ div[data-testid="stPlotlyChart"] {
 """, unsafe_allow_html=True)
 # ================= DB =================
 def get_engine():
-    return sqlalchemy.create_engine(st.secrets["DB_URL"])
+    db_url = st.secrets["DB_URL"]
+    return sqlalchemy.create_engine(db_url)
+
 
 # ================= DATA =================
 @st.cache_data
@@ -439,10 +451,6 @@ def get_route_agency_map():
     return dict(zip(merged["route_id"], merged["agency_name"]))
 
 # ================= SHARED ROUTE COLORS (SINGLE SOURCE OF TRUTH) =================
-# Every route gets ONE color name + ONE hex value, assigned here and reused
-# everywhere: the sidebar checkboxes/emoji swatches, the Live folium map,
-# the Plotly "Transit Map", and the LOOM SVG map. This is what makes the
-# LOOM map's colors match the route colors the user selects in the sidebar.
 ROUTE_COLOR_NAMES = [
     "blue", "red", "green", "purple", "orange", "black", "brown", "grey"
 ]
@@ -484,6 +492,805 @@ def is_major_transit_stop(stop_name):
         normalized == major or normalized.startswith(major + " ")
         for major in MAJOR_TRANSIT_STOPS
     )
+
+
+
+# =========================================================
+# VECTOR LANDMARKS
+# =========================================================
+LANDMARKS = {
+    "Pashupati Temple": {"lat":27.710637, "lon": 85.349527, "svg": "icon/pashupati.svg"},
+    "Dharahara": {"lat": 27.700846100092736, "lon":  85.31200513924873, "svg": "icon/darahara.svg"},
+    "Boudhanath Stupa": {"lat": 27.7215, "lon": 85.3620, "svg": "icon/boudhastupa.svg"},
+    "Swayambhunath": {"lat": 27.7149, "lon": 85.2906, "svg": "icon/swayambhustupa1.svg"},
+    "Tribhuvan International Airport": {"lat": 27.698428, "lon":85.362892, "svg": "icon/vector.svg"},
+    "UN Park": {"lat":27.6854334117676, "lon":85.3257565314652, "svg": "icon/ic_baseline-park.svg"},
+    "Kathmandu Fun Park": {"lat": 27.701374732249555, "lon": 85.32040843415382,"svg": "icon/park.svg"},
+    "ZOO": {"lat": 27.672943662412717, "lon":  85.31179605885961,"svg": "icon/zoo.svg"},
+    "Bir Hospital": {"lat": 27.705641517753943, "lon": 85.31286308128226, "svg": "icon/hospital.svg"},
+    "Basantapur  Durbar Square": {"lat": 27.70429180598546, "lon": 85.30745144002829, "svg": "icon/Group 347.svg"},
+    "Patan Durbar Square": {"lat": 27.672660069722838, "lon":  85.32555712962338, "svg": "icon/PDS.svg"},
+}
+DEFAULT_LANDMARKS = tuple(LANDMARKS.keys())
+
+
+def get_landmark_records(selected_landmarks):
+    records = []
+    for name in selected_landmarks or ():
+        if name not in LANDMARKS:
+            continue
+        record = dict(LANDMARKS[name])
+        record["name"] = name
+        try:
+            record["lat"] = float(record["lat"])
+            record["lon"] = float(record["lon"])
+        except (TypeError, ValueError):
+            continue
+        records.append(record)
+    return records
+
+
+# ------------------------------------------------------------
+# CUSTOM SVG ICONS FOR LANDMARKS
+# ------------------------------------------------------------
+
+def get_landmark_custom_svg_status(record):
+    """Resolve a landmark's custom SVG and report exactly what happened.
+
+    Returns a dict:
+        {"ok": bool, "reason": str, "path": str|None, "svg": str|None}
+
+    "reason" is a short human-readable explanation, always filled in, even
+    on success -- this is what get_landmark_custom_svg() used to swallow,
+    making silent fallback-to-generic-icon impossible to debug.
+    """
+    svg_value = record.get("svg")
+    name = record.get("name", "?")
+
+    if not svg_value:
+        return {"ok": False, "reason": "No \"svg\" key set for this landmark.",
+                "path": None, "svg": None}
+
+    svg_text = str(svg_value).strip()
+    resolved_path = None
+
+    if "<svg" not in svg_text.lower():
+        # Treat as a file path relative to this script's own folder.
+        resolved_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), svg_value
+        )
+        if not os.path.isfile(resolved_path):
+            return {
+                "ok": False,
+                "reason": (
+                    f'File not found: "{resolved_path}". The "svg" value '
+                    f'"{svg_value}" is resolved relative to app.py\'s own '
+                    f"folder -- check the icons/ folder actually ships "
+                    f"next to app.py in this environment."
+                ),
+                "path": resolved_path, "svg": None,
+            }
+        try:
+            with open(resolved_path, "r", encoding="utf-8") as f:
+                svg_text = f.read()
+        except OSError as exc:
+            return {"ok": False, "reason": f"Could not read file: {exc}",
+                     "path": resolved_path, "svg": None}
+
+    if "<svg" not in svg_text.lower():
+        return {
+            "ok": False,
+            "reason": (
+                "Resolved content has no <svg> tag -- the file/string isn't "
+                "actually SVG markup (empty file, HTML error page, wrong "
+                "path pointing at something else, etc.)."
+            ),
+            "path": resolved_path, "svg": None,
+        }
+
+    cleaned = sanitize_uploaded_svg(svg_text)
+    return {"ok": True, "reason": f"Loaded OK ({len(cleaned)} chars).",
+            "path": resolved_path, "svg": cleaned}
+
+
+def get_landmark_custom_svg(record):
+    return get_landmark_custom_svg_status(record)["svg"]
+
+
+def landmark_svg_data_uri(svg_text):
+    encoded = base64.b64encode(svg_text.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
+def sanitize_uploaded_svg(svg_text):
+    text = str(svg_text)
+    text = re.sub(r"<script\b[\s\S]*?</script>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\son\w+\s*=\s*\"[^\"]*\"", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\son\w+\s*=\s*'[^']*'", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(href|xlink:href)\s*=\s*\"(?!#)[^\"]*\"", "", text, flags=re.IGNORECASE)
+    return text
+
+
+def uploaded_svg_viewbox(svg_text):
+    match = re.search(
+        r'\bviewBox\s*=\s*["\']\s*([\d.eE+-]+)\s+([\d.eE+-]+)\s+'
+        r'([\d.eE+-]+)\s+([\d.eE+-]+)\s*["\']',
+        svg_text,
+    )
+    if match:
+        return tuple(float(v) for v in match.groups())
+    # Fall back to width/height if the icon has no viewBox.
+    wm = re.search(r'\bwidth\s*=\s*["\']([\d.]+)', svg_text)
+    hm = re.search(r'\bheight\s*=\s*["\']([\d.]+)', svg_text)
+    if wm and hm:
+        return 0.0, 0.0, float(wm.group(1)), float(hm.group(1))
+    return None
+
+
+def _svg_landmark_group(record, x, y, size=28):
+    name = html.escape(str(record["name"]))
+    s = float(size)
+    hx = s * 0.5
+    hy = s * 0.5
+
+    custom_svg = get_landmark_custom_svg(record)
+    if custom_svg:
+        vb = uploaded_svg_viewbox(custom_svg)
+        vb_attr = (
+            f'viewBox="{vb[0]:.3f} {vb[1]:.3f} {vb[2]:.3f} {vb[3]:.3f}"'
+            if vb else 'viewBox="0 0 100 100"'
+        )
+    
+        inner_match = re.search(r"<svg\b[^>]*>([\s\S]*)</\s*svg\s*>", custom_svg, re.IGNORECASE)
+        inner = inner_match.group(1) if inner_match else custom_svg
+        shapes = (
+            f'<svg x="{x-hx:.3f}" y="{y-hy:.3f}" width="{s:.3f}" height="{s:.3f}" '
+            f'{vb_attr} preserveAspectRatio="xMidYMid meet">{inner}</svg>'
+        )
+    else:
+        kind = record.get("kind", "monument")
+        shapes = _builtin_landmark_shapes(record, x, y, size)
+
+    return f"""
+      <g class="loom-landmark" data-landmark="{name}" data-landmark-name="{name}" tabindex="0" style="cursor:pointer">
+        {shapes}
+        <text class="landmark-label" x="{x+hx*0.95:.3f}" y="{y-hy*0.95:.3f}"
+              visibility="hidden"
+              font-family="Arial, sans-serif" font-size="{max(7,s*0.42):.2f}"
+              font-weight="600" fill="#111111"
+              stroke="white" stroke-width="{max(1,s*0.09):.2f}"
+              paint-order="stroke" stroke-linejoin="round">{name}</text>
+      </g>
+    """
+
+
+def _builtin_landmark_shapes(record, x, y, size=28):
+    """Built-in vector landmark icons (used when no custom SVG is uploaded)."""
+    kind = record.get("kind", "monument")
+    s = float(size)
+    hx = s * 0.5
+    hy = s * 0.5
+
+    if kind == "temple":
+        shapes = f"""
+            <polygon points="{x},{y-hy*0.95} {x-hx*0.72},{y-hy*0.05}
+                     {x+hx*0.72},{y-hy*0.05}"
+                     fill="white" stroke="#7c3aed" stroke-width="{s*0.07:.2f}"/>
+            <rect x="{x-hx*0.42}" y="{y-hy*0.02}"
+                  width="{hx*0.84}" height="{hy*0.78}"
+                  fill="white" stroke="#7c3aed" stroke-width="{s*0.07:.2f}"/>
+            <rect x="{x-hx*0.12}" y="{y+hy*0.18}"
+                  width="{hx*0.24}" height="{hy*0.58}"
+                  fill="white" stroke="#7c3aed" stroke-width="{s*0.06:.2f}"/>
+        """
+    elif kind == "tower":
+        shapes = f"""
+            <polygon points="{x-hx*0.32},{y+hy*0.9}
+                     {x+hx*0.32},{y+hy*0.9}
+                     {x+hx*0.22},{y-hy*0.25}
+                     {x-hx*0.22},{y-hy*0.25}"
+                     fill="white" stroke="#dc2626" stroke-width="{s*0.07:.2f}"/>
+            <rect x="{x-hx*0.36}" y="{y-hy*0.40}"
+                  width="{hx*0.72}" height="{hy*0.18}"
+                  fill="white" stroke="#dc2626" stroke-width="{s*0.06:.2f}"/>
+            <polygon points="{x},{y-hy*0.95}
+                     {x-hx*0.35},{y-hy*0.42}
+                     {x+hx*0.35},{y-hy*0.42}"
+                     fill="white" stroke="#dc2626" stroke-width="{s*0.07:.2f}"/>
+        """
+    elif kind == "stupa":
+        shapes = f"""
+            <circle cx="{x}" cy="{y-hy*0.18}" r="{hx*0.50}"
+                    fill="white" stroke="#ea580c" stroke-width="{s*0.07:.2f}"/>
+            <path d="M {x-hx*0.72},{y+hy*0.55}
+                     Q {x},{y+hy*0.02} {x+hx*0.72},{y+hy*0.55}
+                     L {x+hx*0.55},{y+hy*0.78}
+                     L {x-hx*0.55},{y+hy*0.78} Z"
+                  fill="white" stroke="#ea580c" stroke-width="{s*0.07:.2f}"/>
+            <line x1="{x}" y1="{y-hy*0.70}" x2="{x}" y2="{y-hy*0.98}"
+                  stroke="#ea580c" stroke-width="{s*0.07:.2f}"/>
+        """
+    elif kind == "park":
+        shapes = f"""
+            <circle cx="{x}" cy="{y}" r="{hx*0.78}"
+                    fill="white" stroke="#16a34a" stroke-width="{s*0.07:.2f}"/>
+            <path d="M {x},{y+hy*0.52} L {x},{y-hy*0.28}
+                     M {x},{y-hy*0.10} L {x-hx*0.35},{y-hy*0.38}
+                     M {x},{y+hy*0.08} L {x+hx*0.34},{y-hy*0.18}"
+                  fill="none" stroke="#16a34a" stroke-width="{s*0.07:.2f}"
+                  stroke-linecap="round"/>
+        """
+    else:
+        shapes = f"""
+            <rect x="{x-hx*0.65}" y="{y-hy*0.65}"
+                  width="{s*0.65}" height="{s*0.65}" rx="{s*0.10:.2f}"
+                  transform="rotate(45 {x} {y})"
+                  fill="white" stroke="#1d4ed8" stroke-width="{s*0.07:.2f}"/>
+            <circle cx="{x}" cy="{y}" r="{hx*0.20}" fill="#1d4ed8"/>
+        """
+    return shapes
+
+
+def _svg_viewbox(svg):
+    match = re.search(
+        r'\bviewBox\s*=\s*["\']\s*([-\d.eE+]+)\s+([-\d.eE+]+)\s+'
+        r'([-\d.eE+]+)\s+([-\d.eE+]+)\s*["\']',
+        svg,
+    )
+    return tuple(float(v) for v in match.groups()) if match else None
+
+
+def _normalize_stop_name_for_match(name):
+    """Normalize a stop name so a real GTFS stop can be matched against its
+    rendered LOOM station-label text, which may carry a trailing sequence
+    number LOOM/the GTFS feed appends to disambiguate repeated stop names
+    (e.g. the label "Kalanki Bus Stop1" for the GTFS stop "Kalanki Bus
+    Stop"). Mirrors the normalization is_major_transit_stop() already uses
+    elsewhere in the app for the same reason."""
+    return re.sub(r"[\s_-]*\d+\s*$", "", str(name or "").strip().casefold())
+
+
+def _extract_svg_polyline_segments(svg):
+    """Pull every visibly-stroked <path>'s polyline segments out of a LOOM
+    SVG, in the SVG's own coordinate space. Used to keep landmark icons
+    clear of the actual rendered transit lines -- which, in schematic
+    (octilinear) mode, follow a distorted grid layout rather than a simple
+    function of real-world lon/lat, so this has to read the real drawn
+    geometry rather than recompute it."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return []
+
+    def tag_local(el):
+        return el.tag.split('}')[-1] if '}' in el.tag else el.tag
+
+    segments = []
+    for el in root.iter():
+        if tag_local(el) != 'path':
+            continue
+        # A path counts as a drawn line if it has a visible stroke via
+        # attribute OR inline style. LOOM sometimes carries stroke only in
+        # style="...stroke:#xxxxxx..." or via a CSS class (e.g. on the
+        # <g> wrapper), so checking only the attribute silently missed real
+        # route lines -- which is why landmark icons could still land on
+        # them. Paths with no stroke indication at all are still skipped so
+        # invisible hit-areas / label paths don't create fake obstacles.
+        stroke = (el.get('stroke') or '').strip().lower()
+        style = (el.get('style') or '').lower()
+        style_stroke = re.search(r'stroke\s*:\s*([^;]+)', style)
+        if style_stroke:
+            stroke = style_stroke.group(1).strip().lower()
+        cls = (el.get('class') or '').lower()
+        has_stroke_attr = stroke not in ('', 'none')
+        styled_line = has_stroke_attr or 'transitline' in cls or 'line' in cls
+        if not styled_line:
+            continue
+        stroke_width = el.get('stroke-width')
+        if not stroke_width:
+            m_w = re.search(r'stroke-width\s*:\s*([\d.]+)', style)
+            stroke_width = m_w.group(1) if m_w else None
+        try:
+            if stroke_width is not None and float(stroke_width) <= 0:
+                continue
+        except ValueError:
+            pass
+        d = el.get('d') or ''
+        coords = re.findall(r'([A-Za-z])\s*(-?[\d.eE+]+)[\s,]+(-?[\d.eE+]+)', d)
+        pts = [(float(a), float(b)) for _, a, b in coords]
+        # Guard against degenerate one-point paths (M-only label paths etc.).
+        if len(pts) < 2:
+            continue
+        for i in range(len(pts) - 1):
+            segments.append((pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]))
+    return segments
+
+
+def _collect_route_stops_with_names(selected_routes):
+    """All (name, lon, lat) stops across the selected routes -- used to
+    find, for a given landmark, the nearest real transit stop, so its
+    rendered LOOM position can be looked up by name."""
+    stops = []
+    for route_id in selected_routes:
+        try:
+            ordered = route_stops_ordered(route_id)
+        except Exception:
+            continue
+        if ordered is None or ordered.empty:
+            continue
+        for _, row in ordered.iterrows():
+            try:
+                lon = float(row["stop_lon"])
+                lat = float(row["stop_lat"])
+            except (TypeError, ValueError):
+                continue
+            name = "" if pd.isna(row.get("stop_name")) else str(row["stop_name"]).strip()
+            if not name:
+                continue
+            stops.append({"name": name, "lon": lon, "lat": lat})
+    return stops
+
+
+def _find_svg_station_anchor(landmark_record, route_stops, svg_labels):
+    """Find where the landmark's nearest real transit stop actually ended
+    up in the rendered LOOM SVG, by matching stop names to station-label
+    text. Returns (x, y) or None if no confident match is found (nothing
+    forces a landmark to a wrong spot when its nearest stop's label can't
+    be located)."""
+    if not route_stops or not svg_labels:
+        return None
+
+    lon, lat = float(landmark_record["lon"]), float(landmark_record["lat"])
+    nearest = min(
+        route_stops,
+        key=lambda s: (s["lon"] - lon) ** 2 + (s["lat"] - lat) ** 2,
+    )
+    target = _normalize_stop_name_for_match(nearest["name"])
+    if not target:
+        return None
+
+    for label in svg_labels:
+        if _normalize_stop_name_for_match(label["text"]) == target:
+            try:
+                return float(label["cx"]), float(label["cy"])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _find_svg_landmark_anchor(landmark_record, route_stops, svg_labels, k=5):
+    """Estimate an octilinear landmark position from several nearby stops."""
+    if not route_stops or not svg_labels:
+        return None
+    label_by_name = {}
+    for label in svg_labels:
+        key = _normalize_stop_name_for_match(label.get("text", ""))
+        if key and key not in label_by_name:
+            try:
+                label_by_name[key] = (float(label["cx"]), float(label["cy"]))
+            except (TypeError, ValueError):
+                pass
+    lon, lat = float(landmark_record["lon"]), float(landmark_record["lat"])
+    coslat = math.cos(math.radians(lat))
+    candidates = []
+    for stop in route_stops:
+        pos = label_by_name.get(_normalize_stop_name_for_match(stop.get("name", "")))
+        if pos is None:
+            continue
+        try:
+            slon, slat = float(stop["lon"]), float(stop["lat"])
+        except (TypeError, ValueError):
+            continue
+        dx, dy = (slon-lon)*coslat, slat-lat
+        candidates.append((dx*dx + dy*dy, pos[0], pos[1]))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda v: v[0])
+    if candidates[0][0] < 1e-10:
+        return candidates[0][1], candidates[0][2]
+    nearby = candidates[:min(k, len(candidates))]
+    weights = [1.0/max(v[0],1e-10) for v in nearby]
+    total = sum(weights)
+    return (sum(w*v[1] for w,v in zip(weights,nearby))/total,
+            sum(w*v[2] for w,v in zip(weights,nearby))/total)
+
+
+def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
+                               icon_size=28, schematic=False):
+    """Embed geographic vector landmarks into the LOOM SVG.
+
+    Each landmark is placed either:
+      - anchored to its nearest real transit stop's actual rendered
+        position (found by matching stop names to the SVG's own
+        station-label text) -- this is the only reliable option in
+        schematic/octilinear mode, since octi's layout distorts real-world
+        coordinates; or
+      - if no matching station label is found, a plain linear scaling of
+        its real lon/lat into the map's bounding box (only meaningful in
+        the non-schematic, geographically-accurate layout).
+
+    Either way, the icon is then nudged off any transit line it would
+    otherwise sit on top of (using the map's actual drawn line geometry,
+    not an assumption about where lines "should" be), with a thin dotted
+    leader line back to its anchor point when it had to move.
+    """
+    records = get_landmark_records(selected_landmarks)
+    vb = _svg_viewbox(svg)
+    if not records or not selected_routes or vb is None:
+        return svg
+
+    vx, vy, vw, vh = vb
+    route_stops = _collect_route_stops_with_names(selected_routes)
+    if not route_stops:
+        return svg
+
+    svg_labels = get_svg_label_texts(svg)
+    segments = _extract_svg_polyline_segments(svg)
+
+    # Keep the icon comfortably smaller than the whole map canvas. With the
+    # 3x UI scale (icon_size 84) on a compact/dense LOOM map, a fixed size
+    # can dwarf the lines, so cap it relative to the viewbox and shrink it
+    # further when many landmarks share the same canvas.
+    eff_size = icon_size
+    if segments or svg_labels:
+        max_side = max(vw, vh)
+        canvas_cap = max_side * (
+            0.07 if len(records) > 6 else 0.09 if len(records) > 3 else 0.12
+        )
+        eff_size = min(eff_size, canvas_cap)
+        # Also shrink the whole batch proportionally when landmarks crowd
+        # the smaller map dimension.
+        min_side_cap = min(vw, vh) * 0.12
+        if eff_size > min_side_cap:
+            eff_size = max(eff_size * 0.75, min(eff_size, min_side_cap))
+    eff_size = max(eff_size, 16.0)
+
+    lon_min = min(s["lon"] for s in route_stops)
+    lon_max = max(s["lon"] for s in route_stops)
+    lat_min = min(s["lat"] for s in route_stops)
+    lat_max = max(s["lat"] for s in route_stops)
+    lon_span = max(lon_max-lon_min, 1e-9)
+    lat_span = max(lat_max-lat_min, 1e-9)
+
+    def geo_to_svg(lon, lat):
+        return (vx + ((lon-lon_min)/lon_span)*vw, vy + ((lat_max-lat)/lat_span)*vh)
+
+    placements = []
+    for record in records:
+        if schematic:
+            anchor = _find_svg_landmark_anchor(record, route_stops, svg_labels, k=5)
+            if anchor is None:
+                continue
+            base_x, base_y = anchor
+        else:
+            base_x, base_y = geo_to_svg(record["lon"], record["lat"])
+        x, y, moved = _clear_landmark_of_lines(
+            base_x, base_y, segments, eff_size * 1.6
+        )
+        placements.append((record, x, y, base_x, base_y, moved))
+
+    # After clearing transit lines, spread icons apart so two landmarks
+    # never render on top of each other.
+    canvas_limit = max(vx + vw, vy + vh) * 2.0
+    _separate_landmark_icons(placements, eff_size, segments, canvas_limit)
+
+    if not placements:
+        return svg
+
+    pad = max(icon_size * 2.0, min(vw, vh) * 0.035)
+    all_x = [vx, vx + vw] + [p[1] for p in placements]
+    all_y = [vy, vy + vh] + [p[2] for p in placements]
+    new_min_x, new_max_x = min(all_x) - pad, max(all_x) + pad
+    new_min_y, new_max_y = min(all_y) - pad, max(all_y) + pad
+
+    parts = []
+    for record, x, y, base_x, base_y, moved in placements:
+        if moved:
+            parts.append(
+                f'<line x1="{base_x:.3f}" y1="{base_y:.3f}" '
+                f'x2="{x:.3f}" y2="{y:.3f}" '
+                f'stroke="#9ca3af" stroke-width="1" stroke-dasharray="3,3"/>'
+            )
+        parts.append(_svg_landmark_group(record, x, y, eff_size))
+
+    markup = "\n<!-- Geographic vector landmarks -->\n"
+    markup += "".join(parts)
+    markup += "\n<!-- End geographic vector landmarks -->\n"
+
+    closing = svg.lower().rfind("</svg>")
+    if closing == -1:
+        # ET may have serialized tags with a namespace prefix (e.g.
+        # "</ns0:svg>") if namespace registration was missed -- fall back
+        # to the last element-closing tag rather than silently dropping
+        # the landmarks.
+        closing = svg.lower().rfind("</")
+        if closing == -1:
+            return svg
+    updated = svg[:closing] + markup + svg[closing:]
+    updated = re.sub(
+        r'(\bviewBox\s*=\s*["\'])[-\d.eE+]+\s+[-\d.eE+]+\s+[-\d.eE+]+\s+[-\d.eE+]+(["\'])',
+        lambda m: m.group(1) + f"{new_min_x:.3f} {new_min_y:.3f} "
+                             f"{new_max_x-new_min_x:.3f} {new_max_y-new_min_y:.3f}" + m.group(2),
+        updated, count=1, flags=re.IGNORECASE
+    )
+    return updated
+
+
+def _separate_landmark_icons(placements, icon_size, segments, max_push):
+    """Push landmark icons apart so no two icons overlap each other.
+
+    Two landmarks whose nearest stops anchor them to the same region
+    (common in schematic mode, where several landmarks can resolve to the
+    same weighted cluster of stop labels) would otherwise be drawn stacked
+    on top of one another. This nudges each icon away from its nearest
+    already-placed neighbour, one pass at a time, while keeping the result
+    clear of the transit lines.
+    """
+    # Icons are drawn at roughly `icon_size` px and each carries a hover
+    # label, so centers need well over one icon-width of separation or the
+    # glyphs still visually overlap. 1.7x keeps even the widest custom SVG
+    # icons apart (hospital / fun park / durbar square anchor within ~1 km
+    # of each other in the real data, so the old 1.15x gap left them
+    # stacked on top of one another).
+    min_gap = icon_size * 1.7
+    moved_any = False
+    for i in range(len(placements)):
+        record_i, x_i, y_i, bx_i, by_i, moved_i = placements[i]
+        for _ in range(48):  # bounded relaxation passes
+            best = None
+            for j in range(len(placements)):
+                if i == j:
+                    continue
+                _, x_j, y_j = placements[j][0], placements[j][1], placements[j][2]
+                dx, dy = x_i - x_j, y_i - y_j
+                dist = math.hypot(dx, dy) or 1e-6
+                if dist < min_gap and (best is None or dist < best[0]):
+                    best = (dist, dx / dist, dy / dist)
+            if best is None:
+                break
+            dist, ux, uy = best
+            step = min_gap - dist + icon_size * 0.25
+            nx = x_i + ux * step
+            ny = y_i + uy * step
+            nx, ny, moved = _clear_landmark_of_lines(nx, ny, segments, icon_size)
+            nx = max(-max_push, min(max_push, nx))
+            ny = max(-max_push, min(max_push, ny))
+            x_i, y_i = nx, ny
+            moved_i = moved_i or moved
+            moved_any = True
+        placements[i] = (record_i, x_i, y_i, bx_i, by_i, moved_i)
+
+    # Second phase: if a whole CLUSTER is still tighter than the gap around
+    # its shared centroid (several landmarks anchored to nearly the same
+    # spot), fan the members out in a ring around that centroid so they
+    # don't just slide as one clump.
+    n = len(placements)
+    if n >= 2:
+        cx = sum(p[1] for p in placements) / n
+        cy = sum(p[2] for p in placements) / n
+        cluster = [p for p in placements if math.hypot(p[1] - cx, p[2] - cy) < min_gap]
+        if len(cluster) >= 2:
+            ring_r = min_gap * max(1.0, 0.55 * len(cluster))
+            by_index = {id(p): idx for idx, p in enumerate(placements)}
+            for k, p in enumerate(cluster):
+                angle = 2 * math.pi * k / len(cluster)
+                tx = cx + math.cos(angle) * ring_r
+                ty = cy + math.sin(angle) * ring_r
+                tx, ty, moved = _clear_landmark_of_lines(tx, ty, segments, icon_size)
+                tx = max(-max_push, min(max_push, tx))
+                ty = max(-max_push, min(max_push, ty))
+                idx = by_index[id(p)]
+                rec, _, _, bx, by, mvd = placements[idx]
+                placements[idx] = (rec, tx, ty, bx, by, mvd or moved)
+                moved_any = True
+    return moved_any
+
+
+def _plotly_landmark_path(record, size_deg=0.0019):
+    lat, lon = float(record["lat"]), float(record["lon"])
+    sx = size_deg / max(math.cos(math.radians(lat)), 0.2)
+    sy = size_deg
+    hx, hy = sx*0.5, sy*0.5
+    x, y = lon, lat
+    kind = record.get("kind", "monument")
+
+    if kind == "tower":
+        return (
+            f"M {x-hx*.32},{y+hy*.95} L {x+hx*.32},{y+hy*.95} "
+            f"L {x+hx*.22},{y-hy*.25} L {x-hx*.22},{y-hy*.25} Z "
+            f"M {x-hx*.38},{y-hy*.45} L {x+hx*.38},{y-hy*.45} "
+            f"L {x+hx*.38},{y-hy*.25} L {x-hx*.38},{y-hy*.25} Z "
+            f"M {x},{y-hy*.95} L {x-hx*.35},{y-hy*.42} L {x+hx*.35},{y-hy*.42} Z"
+        )
+    if kind == "stupa":
+        return (
+            f"M {x-hx*.72},{y+hy*.58} Q {x},{y+.02*hy} {x+hx*.72},{y+hy*.58} "
+            f"L {x+hx*.55},{y+hy*.80} L {x-hx*.55},{y+hy*.80} Z "
+            f"M {x-hx*.50},{y-hy*.18} A {hx*.50},{hy*.50} 0 1 0 "
+            f"{x+hx*.50},{y-hy*.18} A {hx*.50},{hy*.50} 0 1 0 {x-hx*.50},{y-hy*.18} Z"
+        )
+    if kind == "park":
+        return (
+            f"M {x},{y-hy*.75} A {hx*.75},{hy*.75} 0 1 0 {x},{y+hy*.75} "
+            f"A {hx*.75},{hy*.75} 0 1 0 {x},{y-hy*.75} Z "
+            f"M {x},{y+hy*.50} L {x},{y-hy*.25} "
+            f"M {x},{y-hy*.05} L {x-hx*.35},{y-hy*.38} "
+            f"M {x},{y+hy*.10} L {x+hx*.34},{y-hy*.18}"
+        )
+    if kind == "temple":
+        return (
+            f"M {x},{y-hy*.95} L {x-hx*.72},{y-hy*.05} L {x+hx*.72},{y-hy*.05} Z "
+            f"M {x-hx*.42},{y-hy*.02} L {x+hx*.42},{y-hy*.02} "
+            f"L {x+hx*.42},{y+hy*.76} L {x-hx*.42},{y+hy*.76} Z"
+        )
+    return f"M {x},{y-hy*.72} L {x+hx*.72},{y} L {x},{y+hy*.72} L {x-hx*.72},{y} Z"
+
+
+def _point_segment_dist_and_normal(px, py, ax, ay, bx, by):
+    """Shortest distance from point (px,py) to segment (a->b), plus a unit
+    vector pointing from the segment out towards the point (used to push a
+    landmark icon clear of the line it's closest to)."""
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    if length_sq == 0:
+        ddx, ddy = px - ax, py - ay
+        dist = math.hypot(ddx, ddy)
+        return (dist, (1.0, 0.0)) if dist == 0 else (dist, (ddx / dist, ddy / dist))
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
+    cx, cy = ax + t * dx, ay + t * dy
+    ddx, ddy = px - cx, py - cy
+    dist = math.hypot(ddx, ddy)
+    if dist == 0:
+        # Point sits exactly on the line -- push perpendicular to it.
+        seg_len = math.hypot(dx, dy) or 1.0
+        return dist, (-dy / seg_len, dx / seg_len)
+    return dist, (ddx / dist, ddy / dist)
+
+
+def _collect_route_line_segments(fig):
+    """Pull every route-line segment (in lon/lat data space) already drawn
+    on the figure, so landmark icons can be checked against them."""
+    segments = []
+    for trace in fig.data:
+        mode = getattr(trace, "mode", "") or ""
+        if "lines" not in mode:
+            continue
+        xs, ys = trace.x, trace.y
+        if xs is None or ys is None:
+            continue
+        xs, ys = list(xs), list(ys)
+        for i in range(len(xs) - 1):
+            x0, y0, x1, y1 = xs[i], ys[i], xs[i + 1], ys[i + 1]
+            if None in (x0, y0, x1, y1):
+                continue
+            segments.append((float(x0), float(y0), float(x1), float(y1)))
+    return segments
+
+
+def _clear_landmark_of_lines(lon, lat, segments, icon_size_deg):
+    """Nudge (x, y) away from the nearest route-line segment so the
+    landmark icon never sits on top of / touches a transit line. Returns
+    (new_x, new_y, moved).
+
+    One push can land the icon on a *different* nearby segment (lines run
+    close together), so iterate until the icon is clear of every segment,
+    bounded so dense/overlapping geometry can't loop forever.
+    """
+    radius = (icon_size_deg / 2.0) * 1.15  # icon half-size + a small margin
+    x, y = lon, lat
+    for _ in range(12):  # bounded passes
+        best_dist, best_dir = None, (0.0, 1.0)
+        for (x0, y0, x1, y1) in segments:
+            dist, direction = _point_segment_dist_and_normal(x, y, x0, y0, x1, y1)
+            if best_dist is None or dist < best_dist:
+                best_dist, best_dir = dist, direction
+
+        if best_dist is None or best_dist >= radius:
+            break
+
+        push = min(radius - best_dist + radius * 0.35, radius * 2.5)
+        nx, ny = best_dir
+        norm = math.hypot(nx, ny) or 1.0
+        nx, ny = nx / norm, ny / norm
+        x, y = x + nx * push, y + ny * push
+    return x, y, (x, y) != (lon, lat)
+
+
+def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.0026):
+    """Add landmark icons in Plotly longitude/latitude data coordinates.
+
+    Each landmark is anchored to its real (lon, lat) by default, so it
+    stays in the correct relative place as the user zooms/pans, and is
+    drawn at a fixed size in data-space (icon_size_deg), so every landmark
+    reads at the same visual size regardless of how spread out the
+    selected routes are.
+
+    Before drawing, each landmark is checked against every route line
+    already on the map; if the icon would touch or overlap a line, it is
+    nudged sideways just far enough to clear it, and a thin dotted leader
+    line is drawn back to the landmark's real position so its true
+    location is still visible.
+
+    If the landmark has a custom uploaded SVG (record["svg"]), that exact
+    SVG is embedded as a Plotly layout image -- matching what the LOOM map
+    already does with _svg_landmark_group(). Landmarks without a custom SVG
+    keep using the built-in vector shape as before.
+    """
+    segments = _collect_route_line_segments(fig)
+
+    for record in get_landmark_records(selected_landmarks):
+        kind = record.get("kind", "monument")
+        stroke = {
+            "temple": "#7c3aed", "tower": "#dc2626", "stupa": "#ea580c",
+            "park": "#16a34a", "monument": "#1d4ed8",
+        }.get(kind, "#1d4ed8")
+
+        true_lon, true_lat = float(record["lon"]), float(record["lat"])
+        # Nudge the icon off any route line it would otherwise touch --
+        # same collision handling the LOOM map uses (_clear_landmark_of_lines
+        # works in plain x/y numbers, so pass lon as x and lat as y).
+        icon_lon, icon_lat, moved = _clear_landmark_of_lines(
+            true_lon, true_lat, segments, icon_size_deg
+        )
+
+        if moved:
+            fig.add_shape(
+                type="line",
+                xref="x", yref="y",
+                x0=true_lon, y0=true_lat, x1=icon_lon, y1=icon_lat,
+                line=dict(color="#9ca3af", width=1, dash="dot"),
+                layer="above",
+            )
+
+        placed_record = dict(record, lon=icon_lon, lat=icon_lat)
+
+        custom_svg = get_landmark_custom_svg(record)
+        if custom_svg:
+            # Longitude degrees are narrower than latitude degrees away
+            # from the equator, so widen sizex to keep the icon visually
+            # square -- same correction _plotly_landmark_path() uses.
+            sizex = icon_size_deg / max(math.cos(math.radians(icon_lat)), 0.2)
+            sizey = icon_size_deg
+            fig.add_layout_image(
+                dict(
+                    source=landmark_svg_data_uri(custom_svg),
+                    xref="x", yref="y",
+                    x=icon_lon, y=icon_lat,
+                    xanchor="center", yanchor="middle",
+                    sizex=sizex, sizey=sizey,
+                    sizing="contain",
+                    layer="above",
+                )
+            )
+        else:
+            fig.add_shape(
+                type="path",
+                path=_plotly_landmark_path(placed_record),
+                xref="x", yref="y",
+                line=dict(color=stroke, width=2.5),
+                fillcolor="white",
+                layer="above",
+            )
+        # Name label: hidden by default, revealed only when the icon is
+        # touched/tapped (mobile) or hovered (desktop) -- a real click-to-
+        # toggle needs custom JS wired into the embedded plot HTML, but an
+        # invisible marker with Plotly's own built-in hover tooltip gets the
+        # same "touch it to see the name, otherwise nothing shows" behavior
+        # for free: on touch devices, tapping a point fires the same hover
+        # event a mouse-over would, and the tooltip disappears again once
+        # you tap/move elsewhere.
+        touch_px = 30 * max(icon_size_deg / 0.0026, 1.0)
+        fig.add_trace(
+            go.Scatter(
+                x=[icon_lon], y=[icon_lat],
+                xaxis="x", yaxis="y",
+                mode="markers",
+                marker=dict(size=touch_px, color="rgba(0,0,0,0)"),
+                                customdata=[[record["name"]]],
+                hovertemplate=f"<b>{html.escape(record['name'])}</b><extra></extra>",
+                showlegend=False,
+            )
+        )
 
 
 @st.cache_data
@@ -622,7 +1429,9 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                       route_spacing=1.0,
                       label_density="Every other stop",
                       show_stop_markers=True,
-                      hidden_label_names=()):
+                      hidden_label_names=(),
+                      selected_landmarks=(),
+                      landmark_icon_size_deg=0.0026):
     """Build the Plotly transit map with automatic label decluttering.
 
     The important change here is that labels are treated as screen-space
@@ -665,6 +1474,10 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                 round(float(row["stop_lon"]), 6),
             )
             stop_routes.setdefault(key, []).append(route_id)
+
+    landmark_records = get_landmark_records(selected_landmarks)
+    map_lons.extend([r["lon"] for r in landmark_records])
+    map_lats.extend([r["lat"] for r in landmark_records])
 
     if not route_data:
         fig.add_annotation(
@@ -810,13 +1623,13 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             if _segments_cross(((anchor_x, anchor_y), (end_x, end_y)), (q1, q2)):
                 return True
 
-        
+
             a1 = math.atan2(end_y - anchor_y, end_x - anchor_x)
             a2 = math.atan2(q2[1] - q1[1], q2[0] - q1[0])
             diff = abs(math.degrees(a1 - a2)) % 180.0
             diff = min(diff, 180.0 - diff)
             if diff < min_angle_diff:
-                
+
                 if math.hypot(anchor_x - q1[0], anchor_y - q1[1]) < 90:
                     return True
         return False
@@ -909,6 +1722,8 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         agency_label = (route_agency_map or {}).get(route_id, "Unknown Agency")
         agency_group = f"agency-{agency_label}"
 
+        # Agency heading: its own legend row (bold, no visible glyph) so
+        # EVERY route keeps its own color swatch underneath it.
         first_agency_route = not any(
             getattr(trace, "legendgroup", None) == agency_group
             for trace in fig.data
@@ -918,12 +1733,15 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                 x=[None],
                 y=[None],
                 mode="markers",
-                marker=dict(size=1, color="rgba(0,0,0,0)"),
-                name=html.escape(str(agency_label)),
+                marker=dict(size=1, color="rgba(0,0,0,0)", opacity=0),
+                name=f"<b>{html.escape(str(agency_label))}</b>",
                 legendgroup=agency_group,
+                showlegend=True,
                 hoverinfo="skip",
                 uid=f"agency-{route_id}",
             ))
+
+        legend_name = html.escape(str(route_label))
 
         lons = ordered["stop_lon"].tolist()
         lats = ordered["stop_lat"].tolist()
@@ -945,7 +1763,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             y=line_lats,
             mode="lines",
             line=dict(color=color, width=5.0),
-            name=html.escape(str(route_label)),
+            name=legend_name,
             hoverinfo="skip",
             legendgroup=agency_group,
             uid=f"line-{route_id}",
@@ -1205,16 +2023,38 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         first_shared_colors[0] if first_shared_colors else symbol_stop_color
     )
 
+    # Symbols section in the same format as the LOOM legend:
+    #   Symbols
+    #   -- Route line (color = route)
+    #   o  Bus stop / station
+    #   O  Interchange (shared stop)
+    #   -- Station name (text beside a stop)
+    # 'Symbols' gets its own heading row so every symbol entry keeps
+    # its own glyph.
     fig.add_trace(go.Scatter(
         x=[None],
         y=[None],
         mode="markers",
-        marker=dict(size=0, color="rgba(0,0,0,0)"),
+        marker=dict(size=1, color="rgba(0,0,0,0)", opacity=0),
         name="<b>Symbols</b>",
         legendgroup="symbols",
+        legend="legend2",
         showlegend=True,
         hoverinfo="skip",
         uid="legend-symbol-header",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=[None, None],
+        y=[None, None],
+        mode="lines",
+        line=dict(color=symbol_stop_color, width=5),
+        name="Route line (color = route)",
+        legendgroup="symbols",
+        legend="legend2",
+        showlegend=True,
+        hoverinfo="skip",
+        uid="legend-symbol-line",
     ))
 
     fig.add_trace(go.Scatter(
@@ -1227,8 +2067,9 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             color="white",
             line=dict(color=symbol_stop_color, width=2.5),
         ),
-        name="Bus stop (single route)",
+        name="Bus stop / station",
         legendgroup="symbols",
+        legend="legend2",
         showlegend=True,
         hoverinfo="skip",
         uid="legend-symbol-stop",
@@ -1246,10 +2087,29 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         ),
         name="Interchange (shared stop)",
         legendgroup="symbols",
+        legend="legend2",
         showlegend=True,
         hoverinfo="skip",
         uid="legend-symbol-interchange",
     ))
+
+    fig.add_trace(go.Scatter(
+        x=[None, None],
+        y=[None, None],
+        mode="lines",
+        line=dict(color="rgba(0,0,0,0)", width=0.01),
+        name="Station name (text)",
+        legendgroup="symbols",
+        legend="legend2",
+        showlegend=True,
+        hoverinfo="skip",
+        uid="legend-symbol-text",
+    ))
+
+    # ------------------------------------------------------------
+    # VECTOR LANDMARKS
+    # ------------------------------------------------------------
+    add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=landmark_icon_size_deg)
 
     # ------------------------------------------------------------
     # FINAL LAYOUT
@@ -1290,6 +2150,28 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             xanchor="right",
             yanchor="bottom",
             groupclick="togglegroup",
+            itemsizing="trace",
+            tracegroupgap=2,
+        ),
+        # Symbols live in their own legend column (top-right) so the
+        # legend area reads as two columns: Routes | Symbols.
+        legend2=dict(
+            orientation="v",
+            bgcolor="rgba(255,255,255,0.94)",
+            bordercolor="rgba(0,0,0,0.15)",
+            borderwidth=1,
+            font=dict(color="#111111", size=11),
+            title=dict(
+                text="<b>Symbols</b>",
+                font=dict(size=12, color="#111111"),
+                side="top",
+            ),
+            xref="paper",
+            yref="paper",
+            x=0.99,
+            y=0.98,
+            xanchor="right",
+            yanchor="top",
             itemsizing="trace",
             tracegroupgap=2,
         ),
@@ -1946,6 +2828,137 @@ def remove_line_labels(svg):
     return ET.tostring(root, encoding='unicode')
 
 
+def orient_octilinear_labels(svg):
+    """Make station-label reading direction consistent per octilinear angle
+    family (0/45/90/135 degrees + their opposites), instead of flattening
+    or re-placing labels.
+
+    transitmap -l already picks good label *positions* on octilinear maps
+    (see generate_loom_svg's comment on why separate_station_labels() was
+    disabled) -- the problem is only which *end* of the label path LOOM
+    treats as the start. That can flip independently per stop, so two
+    labels sitting at the same visual incline (e.g. two 45-degree labels)
+    can end up reading in opposite directions, and one looks upside-down
+    or mirrored relative to the other.
+
+    This pass leaves every path's two endpoints, length and midpoint
+    untouched -- it only reverses point order (start <-> end) so that:
+      - all horizontal labels read left-to-right
+      - all vertical labels read bottom-to-top
+      - all "/" diagonal labels read bottom-left-to-top-right
+      - all "\\" diagonal labels read top-left-to-bottom-right
+    which keeps LOOM's native placement/collision-avoidance intact while
+    making same-angle labels look uniform.
+    """
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    xlink_href = '{http://www.w3.org/1999/xlink}href'
+    ns = root.tag.split('}')[0] if root.tag.startswith('{') else ''
+    text_tag = ns + '}text' if ns else 'text'
+    textpath_tag = ns + '}textPath' if ns else 'textPath'
+
+    path_map = {}
+    for el in root.iter():
+        if el.tag.rsplit('}', 1)[-1] == 'path' and el.get('id'):
+            path_map[el.get('id')] = el
+
+    for text in root.iter(text_tag):
+        if 'station-label' not in (text.get('class') or ''):
+            continue
+        for tp in text.findall(textpath_tag):
+            href = tp.get(xlink_href) or tp.get('href')
+            if not href:
+                continue
+            path_el = path_map.get(href.split('#')[-1])
+            if path_el is None:
+                continue
+
+            d = path_el.get('d') or ''
+            segs = re.findall(r'([A-Za-z])\s*(-?[\d.eE+]+)[\s,]+(-?[\d.eE+]+)', d)
+            if len(segs) < 2:
+                continue
+
+            cmds = [s[0] for s in segs]
+            pts = [(float(a), float(b)) for _, a, b in segs]
+            (x1, y1), (x2, y2) = pts[0], pts[-1]
+            dx, dy = x2 - x1, y2 - y1
+            if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+                continue
+
+            # Canonical rule: the path should point generally rightward
+            # (dx > 0). For the pure-vertical case (dx == 0) it should
+            # point upward on screen (dy < 0, since SVG y grows downward).
+            needs_flip = dx < -1e-6 or (abs(dx) <= 1e-6 and dy > 0)
+            if needs_flip:
+                rev_pts = list(reversed(pts))
+                new_d = ' '.join(
+                    f"{c} {x:.3f} {y:.3f}"
+                    for c, (x, y) in zip(cmds, rev_pts)
+                )
+                path_el.set('d', new_d)
+
+    return ET.tostring(root, encoding='unicode')
+
+
+def shorten_station_labels(svg, max_chars=24):
+    """Shorten only displayed station-label text while preserving LOOM label paths."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    def tag_local(el):
+        return el.tag.split("}")[-1] if "}" in el.tag else el.tag
+
+    def compact_name(name):
+        name = re.sub(r"\s+", " ", name).strip()
+        if len(name) <= max_chars:
+            return name
+        # Prefer the meaningful part before a descriptive suffix.
+        for sep in [",", " - ", " – ", " — ", "(", "/"]:
+            if sep in name:
+                first = name.split(sep, 1)[0].strip()
+                if len(first) >= 8:
+                    return (first[:max_chars-1].rstrip() + "…") if len(first) > max_chars else first
+        # Otherwise keep whole words and add an ellipsis.
+        out = ""
+        for word in name.split():
+            candidate = word if not out else out + " " + word
+            if len(candidate) > max_chars - 1:
+                break
+            out = candidate
+        if not out:
+            out = name[:max_chars-1].rstrip()
+        return out.rstrip(" ,-/–—") + "…"
+
+    for text_el in root.iter():
+        if tag_local(text_el) != "text" or "station-label" not in (text_el.get("class") or ""):
+            continue
+        original = "".join(text_el.itertext()).strip()
+        if not original:
+            continue
+        shortened = compact_name(original)
+        if shortened == original:
+            continue
+
+        title = ET.Element("{http://www.w3.org/2000/svg}title")
+        title.text = original
+        text_el.insert(0, title)
+
+        changed = False
+        for child in list(text_el):
+            if tag_local(child) in ("textPath", "tspan"):
+                child.text = shortened
+                changed = True
+                break
+        if not changed:
+            text_el.text = shortened
+
+    return ET.tostring(root, encoding="unicode")
+
 def separate_station_labels(svg):
     try:
         root = ET.fromstring(svg)
@@ -2394,6 +3407,8 @@ def generate_loom_svg(
     line_spacing=20,
     label_pad=150,
     label_font_scale=1.0,
+    selected_landmarks=(),
+    landmark_icon_size=28,
 ):
     if not selected_routes_tuple:
         raise ValueError("Please select at least one route.")
@@ -2433,7 +3448,34 @@ def generate_loom_svg(
         svg = bring_labels_to_front(svg)  # re-raise labels above enlarged glyphs/markers
 
     svg = remove_line_labels(svg)
-    svg = separate_station_labels(svg)
+
+    # IMPORTANT: transitmap -l already computes label paths/placement.
+    # Do not flatten/re-place station labels after transitmap has placed
+    # them. The old separate_station_labels() pass converted every label to
+    # a horizontal path and then shifted labels in data-space, which was
+    # the main cause of bad/misaligned labels on octilinear maps.
+    # Keep transitmap -l's native label geometry (position/length) intact --
+    # only normalize which direction each label path reads in, so labels
+    # sharing the same octilinear angle (0/45/90/135 degrees) all face the
+    # same way instead of some appearing upside-down/mirrored relative to
+    # others at the same incline.
+    if schematic:
+        svg = orient_octilinear_labels(svg)
+
+    if selected_landmarks:
+        svg = add_landmarks_to_loom_svg(
+            svg,
+            selected_routes_tuple,
+            selected_landmarks,
+            icon_size=landmark_icon_size,
+            schematic=schematic,
+        )
+
+    # Landmarks were injected after the first bring_labels_to_front() pass,
+    # so run it again to guarantee landmark icons/labels render above the
+    # transit lines instead of the lines painting over them.
+    svg = raise_labels_above_markers(svg)
+    svg = bring_labels_to_front(svg)
 
     if label_pad and label_pad > 0:
         svg = pad_svg_viewbox(svg, pad=label_pad)
@@ -2447,6 +3489,92 @@ def add_route_title_to_svg(
     return svg
 
 
+def _content_y_bounds(root):
+    """Best-effort TIGHT bounding box (in the SVG's own coordinate
+    space) of everything actually drawn inside root. Returns
+    (min_x, min_y, max_x, max_y) -- the x bounds are used to crop the
+    wide empty side margins LOOM bakes into its canvas so the exported
+    PNG fills the full width, the y bounds to crop top/bottom padding.
+
+    generate_loom_svg() pads the LOOM output's viewBox by a fixed amount
+    (label_pad, 150px by default) on every side so labels near the edge
+    never clip. That's a good safety margin for a large, dense map, but
+    for a small map (few routes selected) that same fixed padding is a
+    much bigger fraction of the total height, which shows up as a big
+    empty gap above/below the map. This walks the tree and returns the
+    real min/max y of the drawn geometry so the composite can crop back
+    to it instead of trusting the padded viewBox. Returns None if it
+    can't confidently determine anything (caller then falls back to the
+    declared viewBox, so this is purely an enhancement, never required).
+    """
+    ys = []
+    xs = []
+    num_re = re.compile(r'-?\d+(?:\.\d+)?(?:e-?\d+)?', re.IGNORECASE)
+
+    def local(tag):
+        return tag.split('}')[-1] if '}' in tag else tag
+
+    def walk(el, tx=0.0, ty=0.0, scale=1.0):
+        transform = el.get('transform', '') or ''
+        for m in re.finditer(r'translate\(\s*(-?[\d.eE+]+)[ ,]+(-?[\d.eE+]+)', transform):
+            tx += float(m.group(1)) * scale
+            ty += float(m.group(2)) * scale
+        for m in re.finditer(r'scale\(\s*(-?[\d.]+)', transform):
+            scale *= float(m.group(1))
+
+        tag = local(el.tag)
+        try:
+            if tag == 'circle' or tag == 'ellipse':
+                cx = float(el.get('cx', 0))
+                cy = float(el.get('cy', 0))
+                r = float(el.get('rx', el.get('r', 0)))
+                ry = float(el.get('ry', el.get('r', 0)))
+                xs.append(tx + (cx - r) * scale)
+                xs.append(tx + (cx + r) * scale)
+                ys.append(ty + (cy - ry) * scale)
+                ys.append(ty + (cy + ry) * scale)
+            elif tag == 'rect' or tag == 'image':
+                x = float(el.get('x', 0))
+                y = float(el.get('y', 0))
+                w_ = float(el.get('width', 0))
+                h_ = float(el.get('height', 0))
+                xs.append(tx + x * scale)
+                xs.append(tx + (x + w_) * scale)
+                ys.append(ty + y * scale)
+                ys.append(ty + (y + h_) * scale)
+            elif tag in ('text', 'tspan'):
+                y = el.get('y')
+                x = el.get('x')
+                if y is not None:
+                    try:
+                        ys.append(ty + float(y.split(',')[0].split()[0]) * scale)
+                    except (ValueError, IndexError):
+                        pass
+                if x is not None:
+                    try:
+                        xs.append(tx + float(x.split(',')[0].split()[0]) * scale)
+                    except (ValueError, IndexError):
+                        pass
+            elif tag in ('path', 'polyline', 'polygon'):
+                d = el.get('d') or el.get('points') or ''
+                nums = [float(n) for n in num_re.findall(d)]
+                # (x, y) pairs -- even indices are x, odd are y.
+                for i in range(0, len(nums) - 1, 2):
+                    xs.append(tx + nums[i] * scale)
+                for i in range(1, len(nums), 2):
+                    ys.append(ty + nums[i] * scale)
+        except (ValueError, TypeError):
+            pass
+
+        for child in list(el):
+            walk(child, tx, ty, scale)
+
+    walk(root)
+    if len(ys) < 2 or len(xs) < 2:
+        return None
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 def build_composite_svg(
     svg, selected_routes, route_name_map, route_color_hex_map,
     route_agency_map=None,
@@ -2458,50 +3586,100 @@ def build_composite_svg(
     w = float(w_match.group(1)) if w_match else 1200.0
     h = float(h_match.group(1)) if h_match else 800.0
 
-    header_h = 55
-    legend_header_h = 50
-    legend_row_h = 26
-    legend_bottom_pad = 20
+    header_h = 64
+    map_legend_gap = 36
+    legend_header_h = 56
+    legend_row_h = 46
+    legend_bottom_pad = 28
+    legend_top_pad = 18
 
-    legend_groups = {}
-    for rid in selected_routes:
-        agency = (route_agency_map or {}).get(rid, "Unknown Agency")
-        legend_groups.setdefault(agency, []).append(rid)
-    legend_row_count = sum(1 + len(route_ids) for route_ids in legend_groups.values())
+    # Symbols column: fixed-width block pinned to the right edge of the
+    # canvas, sized to comfortably fit its longest label at the enlarged
+    # font size below so the text never runs past the canvas edge and
+    # gets clipped.
+    symbol_col_w = 340
+    symbol_glyph_w = 30
+    symbol_right_margin = 30
+
+    # Column-wise legend: each ROUTE gets its own column (heading + entry),
+    # flowing left-to-right and wrapping into multiple rows of columns.
+    # Reserve the Symbols column's width so route columns never run under it.
+    legend_col_w = 195
+    total_w = max(w, 760.0)  # wide enough for legend + symbols side by side
+    route_area_w = max(total_w - 40 - symbol_col_w - 20, legend_col_w)
+    legend_cols_per_row = max(1, int(route_area_w // legend_col_w))
+    route_list = list(selected_routes)
+    legend_row_count = max(1, -(-len(route_list) // legend_cols_per_row))
 
     symbol_row_count = 5
-    legend_h = (
-        legend_header_h
-        + legend_row_h * max(legend_row_count, 1)
-        + legend_bottom_pad
-        + legend_row_h * symbol_row_count
-    )
-    total_w = max(w, 700.0)  # wide enough for legend + symbols side by side
-    total_h = h + header_h + legend_h
 
     inner_svg = None
+    vb_x, vb_y, h_eff = 0.0, 0.0, h
     try:
         inner_root = ET.fromstring(svg)
         vb = (inner_root.get('viewBox') or '').replace(',', ' ').split()
-        vb_x, vb_y = 0.0, 0.0
+        vb_x, vb_y, vb_w, vb_h = 0.0, 0.0, w, h
         if len(vb) == 4:
             try:
-                vb_x, vb_y = float(vb[0]), float(vb[1])
+                vb_x, vb_y, vb_w, vb_h = (float(v) for v in vb)
             except ValueError:
                 pass
+
+        # Crop back the fixed edge padding generate_loom_svg() baked in
+        # (see _content_y_bounds' docstring) so a small map doesn't sit
+        # inside a big empty box -- keep a modest fixed margin around the
+        # real content instead of the full, size-independent pad.
+        content_margin = 24
+        bounds = _content_y_bounds(inner_root)
+        if bounds:
+            x_min, y_min, x_max, y_max = bounds
+            new_left = max(x_min - content_margin, vb_x)
+            new_right = min(x_max + content_margin, vb_x + vb_w)
+            new_top = max(y_min - content_margin, vb_y)
+            new_bottom = min(y_max + content_margin, vb_y + vb_h)
+            if new_bottom - new_top > 80 and new_right - new_left > 80:
+                vb_x, vb_y = new_left, new_top
+                vb_w = new_right - new_left
+                vb_h = new_bottom - new_top
+            h_eff = vb_h
+        else:
+            h_eff = vb_h
+
         inner_parts = [
             ET.tostring(child, encoding='unicode')
             for child in list(inner_root)
         ]
+        # Scale the (cropped) map content so it fills the FULL canvas
+        # width -- the exported PNG then renders the map wide instead of
+        # shrinking it inside leftover side margins. Height grows with the
+        # same factor so nothing is distorted; the legend panel below is
+        # laid out using the scaled height (h_eff). Everything stays
+        # visible because we scale the whole viewBox, never clip it.
+        fit_w = max(w, 760.0)
+        fit_scale = fit_w / max(vb_w, 1.0)
+        h_eff = vb_h * fit_scale
         inner_svg = (
-            f'<g transform="translate({-vb_x:.3f},{header_h - vb_y:.3f})">'
+            f'<g transform="translate({-vb_x * fit_scale:.3f},'
+            f'{header_h - vb_y * fit_scale:.3f}) '
+            f'scale({fit_scale:.4f})">'
             + ''.join(inner_parts)
             + '</g>'
         )
     except ET.ParseError:
         inner_svg = None
+    h = h_eff
+
+    # Route columns (left) | Symbols (right). The block height is driven by
+    # whichever side is taller.
+    legend_h = (
+        legend_top_pad
+        + legend_header_h
+        + legend_row_h * max(legend_row_count, symbol_row_count)
+        + legend_bottom_pad
+    )
+    total_h = h + header_h + map_legend_gap + legend_h
+
     if not inner_svg:
-        # last-resort fallback: text surgery without viewBox compensation
         inner_open = re.search(r'<svg\b[^>]*>', svg)
         if inner_open:
             inner_content = svg[inner_open.end():].rsplit('</svg>', 1)[0]
@@ -2509,62 +3687,76 @@ def build_composite_svg(
         else:
             inner_svg = f'<g transform="translate(0,{header_h})">{svg}</g>'
 
-    legend_top = h + header_h  # y where the legend block begins
+    legend_panel_top = h + header_h + map_legend_gap
+    legend_top = legend_panel_top + legend_top_pad
     symbol_stop_color = route_color_hex_map.get(
         next(iter(selected_routes), ""), "#1d4ed8"
     )
 
+    # Vertical divider between the Routes columns and the Symbols column.
+    divider_x = total_w - symbol_col_w - 20
+
     sym_top = legend_top + legend_header_h
-    sym_x_glyph = 340
-    sym_x_text = 370
+    sym_x_glyph = total_w - symbol_right_margin - symbol_col_w + symbol_glyph_w
+    sym_x_text = sym_x_glyph + symbol_glyph_w
+    # "Symbols" heading sits in the same header row as "Routes" (which is
+    # drawn further below), so both columns start at the same height.
     symbol_rows_svg = (
-        f'<text x="{sym_x_glyph}" y="{sym_top - 4}" '
-        f'font-family="Arial, sans-serif" font-size="14" font-weight="700"  '
+        f'<text x="{sym_x_glyph}" y="{legend_top + 28}" '
+        f'font-family="Arial, sans-serif" font-size="19" font-weight="700" '
         f'fill="#111111">Symbols</text>'
         # route line
-        f'<rect x="{sym_x_glyph}" y="{sym_top + 16}" width="18" height="4" '
+        f'<rect x="{sym_x_glyph}" y="{sym_top + 20}" width="20" height="5" '
         f'fill="{symbol_stop_color}"/>'
-        f'<text x="{sym_x_text}" y="{sym_top + 22}" '
-        f'font-family="Arial, sans-serif" font-size="12" fill="#111111">'
+        f'<text x="{sym_x_text}" y="{sym_top + 27}" '
+        f'font-family="Arial, sans-serif" font-size="15" fill="#111111">'
         f'Route line (color = route)</text>'
         # bus stop
-        f'<circle cx="{sym_x_glyph + 9}" cy="{sym_top + 44}" r="4" '
+        f'<circle cx="{sym_x_glyph + 10}" cy="{sym_top + 55}" r="4.5" '
         f'fill="#ffffff" stroke="{symbol_stop_color}" stroke-width="2.5"/>'
-        f'<text x="{sym_x_text}" y="{sym_top + 48}" '
-        f'font-family="Arial, sans-serif" font-size="12" fill="#111111">'
+        f'<text x="{sym_x_text}" y="{sym_top + 60}" '
+        f'font-family="Arial, sans-serif" font-size="15" fill="#111111">'
         f'Bus stop / station</text>'
         # interchange
-        f'<circle cx="{sym_x_glyph + 9}" cy="{sym_top + 70}" r="7" '
+        f'<circle cx="{sym_x_glyph + 10}" cy="{sym_top + 87}" r="8" '
         f'fill="#ffffff" stroke="{symbol_stop_color}" stroke-width="2.5"/>'
-        f'<text x="{sym_x_text}" y="{sym_top + 74}" '
-        f'font-family="Arial, sans-serif" font-size="12" fill="#111111">'
+        f'<text x="{sym_x_text}" y="{sym_top + 92}" '
+        f'font-family="Arial, sans-serif" font-size="15" fill="#111111">'
         f'Interchange (shared stop)</text>'
         # station name text
-        f'<text x="{sym_x_text}" y="{sym_top + 96}" '
-        f'font-family="Arial, sans-serif" font-size="12" fill="#111111">'
+        f'<text x="{sym_x_text}" y="{sym_top + 119}" '
+        f'font-family="Arial, sans-serif" font-size="15" fill="#111111">'
         f'Text beside a stop = stop name</text>'
     )
 
+    def _fit_svg_text(text, max_w_px, font_px=14):
+        """Truncate text with an ellipsis so it fits max_w_px at font_px.
+        Arial averages ~0.52*font_px per character; estimate conservatively
+        (0.58) to leave a safety margin between columns."""
+        text = str(text)
+        max_chars = max(4, int(max_w_px / (font_px * 0.58)))
+        if len(text) <= max_chars:
+            return html.escape(text)
+        return html.escape(text[: max_chars - 1].rstrip() + "…")
+
     legend_items_svg = []
-    row_index = 0
-    for agency, route_ids in legend_groups.items():
-        y = legend_top + legend_header_h + row_index * legend_row_h
+    for idx, rid in enumerate(route_list):
+        col = idx % legend_cols_per_row
+        row = idx // legend_cols_per_row
+        x = 20 + col * legend_col_w
+        y = legend_top + legend_header_h + row * legend_row_h
+        color = route_color_hex_map.get(rid, "#1d4ed8")
+        agency = (route_agency_map or {}).get(rid, "Unknown Agency")
+        name = str(route_name_map.get(rid, rid))
         legend_items_svg.append(
-            f'<text x="20" y="{y - 4}" font-family="Arial, sans-serif" '
-            f'font-size="13" font-weight="400" fill="#111111">'
-            f'{html.escape(str(agency))}</text>'
+            f'<text x="{x}" y="{y - 4}" font-family="Arial, sans-serif" '
+            f'font-size="13" font-weight="700" fill="#374151">'
+            f'{_fit_svg_text(agency, legend_col_w - 8, 13)}</text>'
+            f'<rect x="{x}" y="{y + 10}" width="20" height="5" fill="{color}"/>'
+            f'<text x="{x + 28}" y="{y + 18}" font-family="Arial, sans-serif" '
+            f'font-size="15" font-weight="400" fill="#111111">'
+            f'{_fit_svg_text(name, legend_col_w - 36, 15)}</text>'
         )
-        row_index += 1
-        for rid in route_ids:
-            y = legend_top + legend_header_h + row_index * legend_row_h
-            color = route_color_hex_map.get(rid, "#1d4ed8")
-            name = html.escape(str(route_name_map.get(rid, rid)))
-            legend_items_svg.append(
-                f'<rect x="20" y="{y - 10}" width="18" height="5" fill="{color}"/>'
-                f'<text x="60" y="{y - 4}" font-family="Arial, sans-serif" '
-                f'font-size="13" font-weight="400" fill="#111111">{name}</text>'
-            )
-            row_index += 1
     legend_svg = "".join(legend_items_svg)
 
     escaped_title = html.escape(title_text)
@@ -2572,19 +3764,27 @@ def build_composite_svg(
     return f'''<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
      width="{total_w}" height="{total_h}" viewBox="0 0 {total_w} {total_h}">
   <rect x="0" y="0" width="{total_w}" height="{total_h}" fill="#ffffff"/>
-  <text x="{total_w / 2}" y="{header_h / 2 + 8}" text-anchor="middle"
-        font-family="Arial, sans-serif" font-size="24" font-weight="700"
+  <text x="{total_w / 2}" y="{header_h / 2 + 15}" text-anchor="middle"
+        font-family="Arial, sans-serif" font-size="44" font-weight="700"
         fill="#111111">{escaped_title}</text>
   {inner_svg}
-  <text x="20" y="{legend_top + 24}" font-family="Arial, sans-serif"
-        font-size="14" font-weight="400" fill="#111111">Routes</text>
+  <line x1="0" y1="{h + header_h + map_legend_gap / 2:.1f}"
+        x2="{total_w}" y2="{h + header_h + map_legend_gap / 2:.1f}"
+        stroke="#e5e7eb" stroke-width="1"/>
+  <rect x="0" y="{legend_panel_top:.1f}" width="{total_w}"
+        height="{legend_h}" fill="#fafafa"/>
+  <text x="20" y="{legend_top + 28}" font-family="Arial, sans-serif"
+        font-size="19" font-weight="700" fill="#111111">Routes</text>
   {legend_svg}
+  <line x1="{divider_x}" y1="{legend_panel_top + 12:.1f}"
+        x2="{divider_x}" y2="{legend_panel_top + legend_h - 12:.1f}"
+        stroke="#e0e0e0" stroke-width="1"/>
   {symbol_rows_svg}
 </svg>'''
 
 
 def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None):
-    
+
     encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
 
     # ---- build the export (composite) SVG -----------------------------
@@ -2601,27 +3801,51 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
         composite_svg.encode("utf-8")
     ).decode("ascii")
 
+    # Pull the composite's own declared size so the on-screen viewer can
+    # size itself to the map's real aspect ratio (see loomFitContainer
+    # below) instead of guessing from a rendered element.
+    _cw_match = re.search(r'width="([\d.]+)"', composite_svg)
+    _ch_match = re.search(r'height="([\d.]+)"', composite_svg)
+    composite_w = float(_cw_match.group(1)) if _cw_match else 1600.0
+    composite_h = float(_ch_match.group(1)) if _ch_match else 1200.0
+
     legend_groups = {}
     for route_id in selected_routes:
         agency = (route_agency_map or {}).get(route_id, "Unknown Agency")
         legend_groups.setdefault(agency, []).append(route_id)
 
+    # Column-per-route legend: each route is its own fixed-width column
+    # (agency name above the swatch + route name), flowing left-to-right
+    # and wrapping onto new rows. Long route names wrap inside their own
+    # column instead of running into the next one -- the old nowrap rows
+    # made every entry melt together into one unreadable line when two
+    # agencies had routes of similar names.
     legend_items = "".join(
-        f'<div style="margin:0 0 2px; padding:0; font-size:12px; '
-        f'font-weight:400; line-height:1.2; color:#222;">'
-        f'{html.escape(str(agency))}</div>'
-        + "".join(
-            f'<div style="display:flex; align-items:center; gap:7px; '
-            f'margin:2px 0; padding:0; font-size:12px; font-weight:400; '
-            f'line-height:1.2; color:#222; white-space:nowrap;">'
-            f'<span style="width:16px; height:4px; flex:0 0 16px; '
-            f'background:{html.escape(str(route_color_hex_map.get(route_id, "#1d4ed8")))}; '
-            f'display:inline-block; border-radius:2px;"></span>'
-            f'<span style="margin:0; padding:0; font-weight:400;">'
-            f'{html.escape(str(route_name_map.get(route_id, route_id)))}</span></div>'
-            for route_id in route_ids
-        )
-        for agency, route_ids in legend_groups.items()
+        f'<div style="display:flex; flex-direction:column; '
+        f'align-items:flex-start; margin:0 14px 8px 0; padding:0; '
+        f'width:180px; flex:0 0 180px; box-sizing:border-box;">'
+        f'<div style="font-size:10px; font-weight:600; line-height:1.2; '
+        f'color:#666; margin-bottom:3px; white-space:nowrap; '
+        f'overflow:hidden; text-overflow:ellipsis; max-width:100%; '
+        f'letter-spacing:0.03em;">'
+        f'{html.escape(str(agency))}'
+        f'</div>'
+        f'<div style="display:flex; align-items:flex-start; gap:7px; '
+        f'padding:0; font-size:12px; font-weight:400; line-height:1.3; '
+        f'color:#222; width:100%; box-sizing:border-box;">'
+        f'<span style="width:16px; height:4px; flex:0 0 16px; '
+        f'margin-top:5px; '
+        f'background:{html.escape(str(route_color_hex_map.get(route_id, "#1d4ed8")))}; '
+        f'display:inline-block; border-radius:2px;"></span>'
+        f'<span style="margin:0; padding:0; font-weight:400; '
+        f'overflow-wrap:break-word; word-break:break-word; min-width:0; flex:1 1 auto;">'
+        f'{html.escape(str(route_name_map.get(route_id, route_id)))}</span></div>'
+        f'</div>'
+        for route_id in selected_routes
+    )
+    legend_items = (
+        f'<div style="display:flex; flex-wrap:wrap; align-items:flex-start; '
+        f'max-width:100%;">{legend_items}</div>'
     )
 
     symbol_stop_color = html.escape(str(
@@ -2660,13 +3884,13 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
     )
 
     html_code = f"""
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <div id="loom-wrapper" style="position:relative; background:#ffffff;
          border-radius:8px; overflow:hidden; border:1px solid #ddd;">
-            <div style="padding:14px 18px 10px; background:#ffffff; color:#111111;
-                     text-align:center; font-family:Arial,sans-serif;">
-                <div style="font-size:24px; font-weight:700;">Transit Map of Kathmandu Valley</div>
-            </div>
+      <style>
+        /* Make the LOOM SVG itself fill the wrapper width so the map
+           renders as a wide frame, not a small fixed-width image. */
+        #loom-img svg {{ width: 100% !important; height: auto !important; display: block; }}
+      </style>
       <div id="loom-toolbar" style="display:flex; gap:6px; align-items:center;
            flex-wrap:wrap; padding:6px 10px; background:#f3f4f6; border-bottom:1px solid #ddd;">
         <button onclick="loomZoom(1.25)"
@@ -2691,27 +3915,14 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
                        border:1px solid #ccc; background:#fff; margin-left:auto;">
                 ⛶ Full Screen</button>
       </div>
-     <div id="loom-scroll" style="position:relative; overflow:auto; width:100%; height:680px;
-         background:#fff; padding:24px 28px 70px 28px; box-sizing:border-box;">
-        <img id="loom-img"
-             src="data:image/svg+xml;base64,{encoded}"
-             alt="LOOM Transit Map"
-             style="display:block; width:88%; max-width:88%; height:auto;
-                    margin:0 auto; transform-origin:0 0; transition:transform 0.15s ease;
+     <div id="loom-scroll" style="position:relative; overflow:auto; width:100%; height:760px;
+         background:#fff; padding:24px 28px 24px 28px; box-sizing:border-box;">
+        <div id="loom-img"
+             style="display:block; width:100%; max-width:100%; margin:0 auto;
+                    transform-origin:0 0; transition:transform 0.15s ease;
                     cursor:grab; user-select:none; touch-action:none;">
-                <div style="position:absolute; right:18px; bottom:14px; z-index:2;
-                         background:rgba(255,255,255,0.97); border:1px solid #d0d0d0;
-                         padding:9px 12px; color:#222; font:12px Arial,sans-serif;
-                         line-height:1.2; box-shadow:0 1px 4px rgba(0,0,0,.12);
-                         min-width:145px;">
-                    <div style="font-weight:400; margin:0 0 5px; padding:0;
-                                color:#111; line-height:1.2;">Routes</div>
-                    {legend_items}
-                    <div style="border-top:1px solid #ddd; margin:7px 0 6px;"></div>
-                    <div style="font-weight:400; margin:0 0 5px; padding:0;
-                                color:#111; line-height:1.2;">Symbols</div>
-                    {symbol_items}
-                </div>
+          {composite_svg}
+        </div>
       </div>
     </div>
     <script>
@@ -2719,36 +3930,143 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
       // with no extra title or legend baked in.
       const loomCompositeSvgDataUrl = "data:image/svg+xml;base64,{composite_b64}";
 
-      let loomScale = 1.5; // start zoomed in
-            let loomPanX = 0;
-            let loomPanY = 0;
-            let loomDragging = false;
+      // The composite's own aspect ratio (map + title + legend), used
+      // below to size the viewer so the whole map is visible on load
+      // instead of forcing a scroll to see the bottom of it.
+      const LOOM_COMPOSITE_W = {composite_w};
+      const LOOM_COMPOSITE_H = {composite_h};
+
+      // Grow (or shrink) #loom-scroll so the composite renders at its
+      // natural, unzoomed height within the current width -- capped so
+      // it never takes over the whole browser window. Only applies at
+      // scale 1 with no pan; once the user zooms in, panning/scrolling
+      // inside the fixed-height viewport takes over as normal.
+      function loomFitContainer() {{
+        const scrollEl = document.getElementById('loom-scroll');
+        const img = document.getElementById('loom-img');
+        if (!scrollEl || !img) return;
+        const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+        // The SVG fills #loom-img at width:100%, and #loom-img itself can
+        // be forced wider than the viewport (see loomFullscreen's
+        // min-width), so measure the image's real rendered width rather
+        // than assuming it matches the scroll container.
+        const imgW = img.getBoundingClientRect().width || (scrollEl.clientWidth - 56);
+        const naturalH = imgW * (LOOM_COMPOSITE_H / LOOM_COMPOSITE_W);
+        const capH = window.innerHeight * (isFs ? 0.92 : 0.85);
+        scrollEl.style.height = Math.max(360, Math.min(naturalH + 94, capH)) + 'px';
+      }}
+
+      // Keep the map inside a predictable desktop/full-screen range.
+      // 1.0 = normal size; users can zoom from 0.85x to 2.5x.
+      const LOOM_MIN_SCALE = 0.85;
+      const LOOM_MAX_SCALE = 2.50;
+      let loomScale = 1.0;
+      let loomPanX = 0;
+      let loomPanY = 0;
+      let loomDragging = false;
             let loomDragStartX = 0;
             let loomDragStartY = 0;
             let loomStartPanX = 0;
             let loomStartPanY = 0;
 
+            function loomClampPan() {{
+                const img = document.getElementById('loom-img');
+                const viewport = document.getElementById('loom-scroll');
+                if (!img || !viewport) return;
+
+                const vw = Math.max(viewport.clientWidth - 40, 1);
+                const vh = Math.max(viewport.clientHeight - 55, 1);
+                const iw = Math.max(img.offsetWidth, 1) * loomScale;
+                const ih = Math.max(img.offsetHeight, 1) * loomScale;
+
+                // Never allow the transformed image to be panned completely
+                // outside the visible desktop/full-screen viewport.
+                const maxX = Math.max(0, (iw - vw) / 2 + 120);
+                const maxY = Math.max(0, (ih - vh) / 2 + 120);
+
+                loomPanX = Math.min(Math.max(loomPanX, -maxX), maxX);
+                loomPanY = Math.min(Math.max(loomPanY, -maxY), maxY);
+            }}
+
             function loomApplyTransform() {{
                 const img = document.getElementById('loom-img');
-                img.style.transform = 'translate(' + loomPanX + 'px, ' + loomPanY + 'px) scale(' + loomScale + ')';
+                if (!img) return;
+                loomClampPan();
+                img.style.transform =
+                    'translate(' + loomPanX + 'px, ' + loomPanY + 'px) scale(' + loomScale + ')';
+                // Expand the scrollable area to the SCALED size of the map
+                // (the CSS transform alone doesn't create scrollable
+                // overflow, which is why zooming used to clip the map).
+                // The margins grow/shrink with the zoom level, so the
+                // scrollbars always span the whole map and every edge of
+                // it stays reachable while zoomed in.
+                const iw = Math.max(img.offsetWidth, 1) * loomScale;
+                const ih = Math.max(img.offsetHeight, 1) * loomScale;
+                img.style.marginRight = Math.max(0, iw - img.offsetWidth) + 'px';
+                img.style.marginBottom = Math.max(0, ih - img.offsetHeight) + 'px';
             }}
 
       function loomZoom(factor) {{
-        loomScale = Math.min(Math.max(loomScale * factor, 0.3), 8);
-                loomApplyTransform();
+        const oldScale = loomScale;
+        loomScale = Math.min(Math.max(loomScale * factor, LOOM_MIN_SCALE), LOOM_MAX_SCALE);
+        if (loomScale === oldScale) return;
+        loomApplyTransform();
       }}
 
       function loomReset() {{
         loomScale = 1;
                 loomPanX = 0;
                 loomPanY = 0;
+                loomFitContainer();
                 loomApplyTransform();
                 document.getElementById('loom-scroll').scrollTo(0, 0);
       }}
 
+      window.addEventListener('resize', loomFitContainer);
+
             const loomImg = document.getElementById('loom-img');
 
-            // apply the initial zoom
+            // Landmark names are hidden until hover/touch/click.
+            const landmarkGroups = Array.from(document.querySelectorAll('#loom-img .loom-landmark'));
+            function hideLandmarkLabels(exceptGroup) {{
+                landmarkGroups.forEach(function(group) {{
+                    if (group === exceptGroup) return;
+                    const label = group.querySelector('.landmark-label');
+                    if (label) label.setAttribute('visibility', 'hidden');
+                    group.classList.remove('landmark-active');
+                }});
+            }}
+            function showLandmarkLabel(group) {{
+                const label = group.querySelector('.landmark-label');
+                if (!label) return;
+                hideLandmarkLabels(group);
+                label.setAttribute('visibility', 'visible');
+                group.classList.add('landmark-active');
+            }}
+            landmarkGroups.forEach(function(group) {{
+                group.addEventListener('mouseenter', function() {{ showLandmarkLabel(group); }});
+                group.addEventListener('mouseleave', function() {{
+                    if (!group.classList.contains('landmark-pinned')) {{
+                        const label = group.querySelector('.landmark-label');
+                        if (label) label.setAttribute('visibility', 'hidden');
+                        group.classList.remove('landmark-active');
+                    }}
+                }});
+                group.addEventListener('click', function(event) {{
+                    event.stopPropagation();
+                    const pinned = group.classList.contains('landmark-pinned');
+                    landmarkGroups.forEach(function(g) {{ g.classList.remove('landmark-pinned'); }});
+                    if (!pinned) {{ showLandmarkLabel(group); group.classList.add('landmark-pinned'); }}
+                    else {{ const label=group.querySelector('.landmark-label'); if(label) label.setAttribute('visibility','hidden'); group.classList.remove('landmark-active'); }}
+                }});
+                group.addEventListener('touchstart', function(event) {{ event.stopPropagation(); showLandmarkLabel(group); group.classList.add('landmark-pinned'); }}, {{passive:true}});
+                group.addEventListener('focus', function() {{ showLandmarkLabel(group); }});
+            }});
+
+            // Size the viewer to the map's own aspect ratio, then apply
+            // the initial (unzoomed) transform, so the whole map is
+            // visible without needing to scroll first.
+            loomFitContainer();
             loomApplyTransform();
 
             // mouse-wheel zoom (zoom towards the cursor)
@@ -2759,10 +4077,11 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
                 const rect = loomImg.getBoundingClientRect();
                 const cx = event.clientX - rect.left;
                 const cy = event.clientY - rect.top;
-                const newScale = Math.min(Math.max(loomScale * factor, 0.3), 8);
+                const newScale = Math.min(Math.max(loomScale * factor, LOOM_MIN_SCALE), LOOM_MAX_SCALE);
                 loomPanX = cx - (cx - loomPanX) * (newScale / loomScale);
                 loomPanY = cy - (cy - loomPanY) * (newScale / loomScale);
                 loomScale = newScale;
+                loomClampPan();
                 loomApplyTransform();
             }}, {{ passive: false }});
 
@@ -2825,7 +4144,10 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
       // symbols), so the exported file matches the full panel.
       async function loomDownloadPNG() {{
         try {{
-          const scale = 3; // render at higher resolution than on-screen size
+          // Render at FULL-SCREEN-SIZE resolution: at least 3x the map's
+          // natural size, and wide enough to match a 1920px-wide screen,
+          // so the downloaded PNG is a crisp, whole-map poster image.
+          const scale = 4;
 
           // Parse the explicit width/height out of the composite SVG so we
           // never depend on naturalWidth (which some browsers report as 0
@@ -2880,27 +4202,31 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
             el.style.width = '100vw'; el.style.height = '100vh';
             el.style.zIndex = '99999';
             el.style.background = '#ffffff';
-            scrollEl.style.height = 'calc(100vh - 44px)';
             scrollEl.style.width = '100vw';
-            scrollEl.style.padding = '18px 24px 80px 24px';
+            scrollEl.style.padding = '18px 24px 24px 24px';
             loomImg.style.width = '96vw';
-            loomImg.style.minWidth = '1600px';
+            loomImg.style.minWidth = '0';
             loomImg.style.maxWidth = 'none';
             loomImg.style.margin = '0 auto';
           }} else {{
             el.style.position = 'relative';
             el.style.width = 'auto'; el.style.height = 'auto';
             el.style.zIndex = 'auto';
-            scrollEl.style.height = '760px';
             scrollEl.style.width = '100%';
-            scrollEl.style.padding = '24px 28px 70px 28px';
+            scrollEl.style.padding = '24px 28px 24px 28px';
             loomImg.style.width = '96%';
-            loomImg.style.minWidth = '1400px';
+            loomImg.style.minWidth = '0';
             loomImg.style.maxWidth = 'none';
           }}
+          // Re-measure and refit after the layout above takes effect.
+          requestAnimationFrame(loomFitContainer);
         }}
 
         if (!isFs) {{
+          loomPanX = 0;
+          loomPanY = 0;
+          loomScale = 1.0;
+          loomApplyTransform();
           const req = el.requestFullscreen || el.webkitRequestFullscreen;
           if (req) {{
             req.call(el).then(() => applyFullscreenStyle(true))
@@ -2920,13 +4246,597 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
           const el = document.getElementById('loom-wrapper');
           el.style.position = 'relative';
           el.style.width = 'auto'; el.style.height = 'auto';
-          document.getElementById('loom-scroll').style.height = '680px';
         }}
+        requestAnimationFrame(loomFitContainer);
       }});
     </script>
-    
+
     """
     st.components.v1.html(html_code, height=830, scrolling=True)
+
+
+def build_map_legend_html(selected_routes, route_name_map, route_color_hex_map,
+                           route_agency_map=None):
+    """Build the Routes/Symbols legend markup shared by the Transit Map and
+    the LOOM map, so both views show exactly the same legend.
+
+    Each route gets its own small column (agency name above a colored
+    swatch + route name); columns flow left-to-right and wrap onto new
+    rows as needed, instead of stacking every route in one long list.
+    """
+
+    legend_items = "".join(
+        f'<div style="display:flex; flex-direction:column; '
+        f'align-items:flex-start; margin:0 20px 10px 0; padding:0; '
+        f'width:190px; flex:0 0 190px; box-sizing:border-box;">'
+        f'<div style="font-size:11px; font-weight:400; line-height:1.2; '
+        f'color:#666; margin-bottom:3px; white-space:nowrap; '
+        f'overflow:hidden; text-overflow:ellipsis; max-width:100%;">'
+        f'{html.escape(str((route_agency_map or {}).get(route_id, "Unknown Agency")))}'
+        f'</div>'
+        f'<div style="display:flex; align-items:flex-start; gap:7px; '
+        f'padding:0; font-size:13px; font-weight:400; line-height:1.3; '
+        f'color:#222; width:100%; box-sizing:border-box;">'
+        f'<span style="width:16px; height:4px; flex:0 0 16px; '
+        f'margin-top:5px; '
+        f'background:{html.escape(str(route_color_hex_map.get(route_id, "#1d4ed8")))}; '
+        f'display:inline-block; border-radius:2px;"></span>'
+        f'<span style="margin:0; padding:0; font-weight:400; '
+        f'overflow-wrap:break-word; word-break:break-word; min-width:0; flex:1 1 auto;">'
+        f'{html.escape(str(route_name_map.get(route_id, route_id)))}</span></div>'
+        f'</div>'
+        for route_id in selected_routes
+    )
+    legend_items = (
+        f'<div style="display:flex; flex-wrap:wrap; align-items:flex-start; '
+        f'max-width:660px;">{legend_items}</div>'
+    )
+
+    symbol_stop_color = html.escape(str(
+        route_color_hex_map.get(next(iter(selected_routes), ""), "#1d4ed8")
+    ))
+    symbol_items = (
+        '<div style="display:flex; align-items:center; gap:7px; '
+        'margin:2px 0; padding:0; font-size:13px; font-weight:400; '
+        'line-height:1.2; color:#222;">'
+        f'<span style="width:16px; height:4px; flex:0 0 16px; '
+        f'background:{symbol_stop_color}; display:inline-block; border-radius:2px;"></span>'
+        '<span style="margin:0; padding:0; font-weight:400;">Route line</span></div>'
+
+        '<div style="display:flex; align-items:center; gap:7px; '
+        'margin:2px 0; padding:0; font-size:13px; font-weight:400; '
+        'line-height:1.2; color:#222;">'
+        '<span style="width:8px; height:8px; flex:0 0 8px; '
+        'border-radius:50%; background:#fff; '
+        f'border:2px solid {symbol_stop_color}; box-sizing:border-box; '
+        'display:inline-block;"></span>'
+        '<span style="margin:0; padding:0; font-weight:400;">Bus stop / station</span></div>'
+
+        '<div style="display:flex; align-items:center; gap:7px; '
+        'margin:2px 0; padding:0; font-size:13px; font-weight:400; '
+        'line-height:1.2; color:#222;">'
+        '<span style="width:14px; height:14px; flex:0 0 14px; '
+        'border-radius:50%; background:#fff; '
+        f'border:2px solid {symbol_stop_color}; box-sizing:border-box; '
+        'display:inline-block;"></span>'
+        '<span style="margin:0; padding:0; font-weight:400;">Interchange</span></div>'
+
+        '<div style="margin:2px 0; padding:0; font-size:13px; '
+        'font-weight:400; line-height:1.2; color:#222;">Station name</div>'
+    )
+
+    return legend_items, symbol_items
+
+
+def _build_map_legend_rows(selected_routes, route_name_map, route_color_hex_map,
+                           route_agency_map=None):
+    """Return the Routes/Symbols legend as plain JSON-able data, used by the
+    Transit Map's PNG export to draw the legend directly onto the export
+    canvas (html2canvas chokes on malformed selectors Plotly injects into
+    the page CSS, so we avoid rasterizing the live legend DOM entirely)."""
+
+    legend_groups = {}
+    for route_id in selected_routes:
+        agency = (route_agency_map or {}).get(route_id, "Unknown Agency")
+        legend_groups.setdefault(agency, []).append(route_id)
+
+    groups = [
+        {
+            "agency": str(agency),
+            "routes": [
+                {
+                    "name": str(route_name_map.get(route_id, route_id)),
+                    "color": str(route_color_hex_map.get(route_id, "#1d4ed8")),
+                }
+                for route_id in route_ids
+            ],
+        }
+        for agency, route_ids in legend_groups.items()
+    ]
+
+    symbol_stop_color = str(
+        route_color_hex_map.get(next(iter(selected_routes), ""), "#1d4ed8")
+    )
+    symbols = [
+        {"type": "line", "color": symbol_stop_color, "label": "Route line"},
+        {"type": "circle", "radius": 4, "color": symbol_stop_color,
+         "label": "Bus stop / station"},
+        {"type": "circle", "radius": 7, "color": symbol_stop_color,
+         "label": "Interchange"},
+        {"type": "text", "color": symbol_stop_color, "label": "Station name"},
+    ]
+
+    return {"groups": groups, "symbols": symbols}
+
+
+def display_transit_map(fig, selected_routes, route_name_map, route_color_hex_map,
+                         route_agency_map=None, height=720):
+    """Render the Plotly Transit Map with a fixed Routes/Symbols legend box,
+    styled and positioned the same way as the LOOM map's legend.
+
+    The legend is a plain HTML overlay sitting on top of the Plotly div
+    (not part of the Plotly figure), so it never moves, grows into, or
+    hides behind anything when the map is zoomed or panned -- it just
+    stays put in its own corner. Because it sits above the plot in the
+    stacking order, scrolling or dragging while the pointer is over the
+    legend never reaches the map underneath; everywhere else on the map,
+    zoom and pan keep working as before. In full screen, the legend
+    stretches to span the screen from edge to edge instead of staying a
+    small corner box.
+    """
+
+    # The overlay legend replaces Plotly's own legend, so switch that off
+    # -- otherwise the routes and symbols would show up twice.
+    fig.update_layout(showlegend=False)
+
+    plot_html = pio.to_html(
+        fig,
+        include_plotlyjs="cdn",
+        full_html=False,
+        div_id="transit-plot-div",
+        config={
+            "scrollZoom": True,
+            "responsive": True,
+            "displayModeBar": True,
+            "displaylogo": False,
+            # Plotly's own built-in camera/download button only captures the
+            # chart's internal SVG canvas, not the HTML legend sitting on
+            # top of it, so it would silently export a map with no legend.
+            # Remove it in favor of the "PNG" button above, which captures
+            # both together.
+            "modeBarButtonsToRemove": ["toImage"],
+        },
+    )
+
+    legend_items, symbol_items = build_map_legend_html(
+        selected_routes, route_name_map, route_color_hex_map, route_agency_map
+    )
+
+    # Structured legend data (as JSON) for the JavaScript PNG exporter,
+    # so it can draw the legend directly on the export canvas without
+    # relying on html2canvas (which chokes on Plotly's injected CSS).
+    legend_rows_json = json.dumps(
+        _build_map_legend_rows(
+            selected_routes, route_name_map, route_color_hex_map, route_agency_map
+        ),
+        ensure_ascii=False,
+    )
+
+    html_code = f"""
+    <div id="transit-wrapper" style="position:relative; background:#ffffff;
+         border-radius:8px; overflow:hidden; border:1px solid #ddd;">
+      <div id="transit-toolbar" style="display:flex; gap:6px; align-items:center;
+           flex-wrap:wrap; padding:6px 10px; background:#f3f4f6; border-bottom:1px solid #ddd;">
+        <span style="font-size:13px; color:#555; margin-right:auto;">Transit Map of Kathmandu Valley</span>
+        <button onclick="transitDownloadPNG()"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #ccc; background:#fff;">⬇ PNG</button>
+        <button onclick="transitFullscreen()"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #ccc; background:#fff;">⛶ Full Screen</button>
+      </div>
+      <div id="transit-plot-container" style="position:relative; width:100%; height:{height}px;">
+        {plot_html}
+        <div id="transit-legend" style="position:absolute; left:18px; bottom:14px; z-index:5;
+             background:rgba(255,255,255,0.97); border:1px solid #d0d0d0;
+             padding:10px 14px; color:#222; font:13px Arial,sans-serif;
+             line-height:1.2; box-shadow:0 1px 4px rgba(0,0,0,.12);
+             display:flex; gap:18px; align-items:flex-start; box-sizing:border-box;
+             max-width:min(94%, 780px);">
+          <div style="min-width:120px;">
+            <div style="font-weight:700; font-size:15px; margin:0 0 6px; padding:0;
+                        color:#111; line-height:1.2;">Routes</div>
+            {legend_items}
+          </div>
+          <div style="min-width:130px; border-left:1px solid #ddd; padding-left:14px;">
+            <div style="font-weight:700; font-size:15px; margin:0 0 6px; padding:0;
+                        color:#111; line-height:1.2;">Symbols</div>
+            {symbol_items}
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      // The legend sits on top of the plot in the stacking order already,
+      // so a wheel/drag that starts on it never reaches the map behind it.
+      // Stopping propagation here just makes that explicit and stops the
+      // page itself from scrolling while the pointer is over the legend.
+      (function() {{
+        const legend = document.getElementById('transit-legend');
+        legend.addEventListener('wheel', function(e) {{ e.stopPropagation(); }}, {{ passive: false }});
+        legend.addEventListener('mousedown', function(e) {{ e.stopPropagation(); }});
+        legend.addEventListener('touchstart', function(e) {{ e.stopPropagation(); }}, {{ passive: true }});
+      }})();
+
+      function transitResizePlot() {{
+        const gd = document.getElementById('transit-plot-div');
+        if (gd && window.Plotly) {{
+          window.Plotly.Plots.resize(gd);
+        }}
+      }}
+
+      // Landmark names are interactive on touch/click as well as Plotly hover.
+      // The invisible landmark hit-area traces carry customdata with the name.
+      (function() {{
+        const gd = document.getElementById('transit-plot-div');
+        if (!gd) return;
+
+        const tip = document.createElement('div');
+        tip.id = 'transit-landmark-touch-label';
+        tip.style.cssText = 'position:absolute;display:none;z-index:20;background:#fff;color:#111;border:1px solid #bbb;border-radius:6px;padding:6px 9px;font:600 13px Arial,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.18);pointer-events:none;white-space:nowrap;';
+        document.getElementById('transit-plot-container').appendChild(tip);
+
+        gd.on('plotly_click', function(eventData) {{
+          const point = eventData && eventData.points && eventData.points[0];
+          if (!point || !point.customdata || !point.customdata[0]) return;
+
+          const name = point.customdata[0];
+          tip.textContent = name;
+          tip.style.display = 'block';
+
+          const rect = gd.getBoundingClientRect();
+          const px = Number(point.event && point.event.clientX) - rect.left;
+          const py = Number(point.event && point.event.clientY) - rect.top;
+          tip.style.left = Math.max(8, px + 10) + 'px';
+          tip.style.top = Math.max(8, py - 34) + 'px';
+        }});
+
+        gd.addEventListener('mouseleave', function() {{
+          tip.style.display = 'none';
+        }});
+      }})();
+
+      // Composites the Plotly map and the HTML legend into one PNG, so
+      // the legend actually shows up in the downloaded image -- Plotly's
+      // own export only rasterizes its own SVG canvas and never touches
+      // the legend overlay sitting on top of it.
+      function transitTriggerDownload(url, filename) {{
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }}
+
+      async function transitDownloadPNG() {{
+        try {{
+          const gd = document.getElementById('transit-plot-div');
+          const legend = document.getElementById('transit-legend');
+          const container = document.getElementById('transit-plot-container');
+          if (!gd || !window.Plotly) {{
+            alert('The map is still loading -- try again in a moment.');
+            return;
+          }}
+
+          const scale = 2;
+          const w = container.offsetWidth;
+          const h = container.offsetHeight;
+          // The Plotly figure already renders its own title, so the export
+          // canvas is exactly the map + legend -- no extra title band.
+
+          const legendData = {legend_rows_json};
+
+          const mapDataUrl = await window.Plotly.toImage(
+            gd, {{ format: 'png', width: w, height: h, scale: scale }}
+          );
+
+          const mapImg = new Image();
+          mapImg.onload = function() {{
+            const canvas = document.createElement('canvas');
+            canvas.width = w * scale;
+            canvas.height = h * scale;
+            const ctx = canvas.getContext('2d');
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.drawImage(mapImg, 0, 0, w * scale, h * scale);
+
+            // Draw the legend box manually (html2canvas is unreliable here
+            // because Plotly injects malformed CSS selectors into the page).
+            // Column widths are measured from the actual text so long route
+            // names never spill into the Symbols column.
+            const fs = 13 * scale;
+            const headFs = 15 * scale;
+            const rowH = 20 * scale;
+            const gap = 8 * scale;
+            const colGap = 20 * scale;
+            const padX = 14 * scale;
+            const padTop = 12 * scale;
+            const glyphW = 26 * scale;
+
+            function textWAt(t, fontPx, weight) {{
+              ctx.font = (weight ? weight + ' ' : '') + fontPx + 'px Arial, sans-serif';
+              return ctx.measureText(t).width;
+            }}
+
+            // Greedy word-wrap: breaks `text` into lines that each fit
+            // within maxW at the currently-set ctx.font, so a long route
+            // name wraps inside its own column instead of overflowing
+            // into the neighboring one.
+            function wrapText(text, maxW) {{
+              const words = String(text).split(' ');
+              const lines = [];
+              let line = '';
+              words.forEach(function(word) {{
+                const test = line ? line + ' ' + word : word;
+                if (ctx.measureText(test).width > maxW && line) {{
+                  lines.push(line);
+                  line = word;
+                }} else {{
+                  line = test;
+                }}
+              }});
+              if (line) lines.push(line);
+              return lines.length ? lines : [''];
+            }}
+
+            function truncateText(text, maxW) {{
+              let t = String(text);
+              if (ctx.measureText(t).width <= maxW) return t;
+              while (t.length > 1 && ctx.measureText(t + '…').width > maxW) {{
+                t = t.slice(0, -1);
+              }}
+              return t + '…';
+            }}
+
+            // Flatten the agency groups into one route-per-column entry
+            // list, each column showing its agency name above a swatch +
+            // route name -- mirrors the on-screen legend's layout. Every
+            // column uses the SAME fixed width, and text wraps/truncates
+            // to fit inside it, so columns can never bleed into each other.
+            const agencyFs = 11 * scale;
+            const routeFs = fs;
+            const colW = 190 * scale;
+            const colGapX = 20 * scale;
+            const colGapY = 10 * scale;
+            const glyphW2 = 22 * scale;
+            const routesMaxRowW = 660 * scale;
+            const lineGap = 2 * scale;
+
+            const agencyLineH = agencyFs * 1.3;
+            const routeLineH = routeFs * 1.3;
+
+            const routeEntries = [];
+            legendData.groups.forEach(function(group) {{
+              group.routes.forEach(function(route) {{
+                ctx.font = agencyFs + 'px Arial, sans-serif';
+                const agencyText = truncateText(group.agency, colW);
+                ctx.font = routeFs + 'px Arial, sans-serif';
+                const nameLines = wrapText(route.name, colW - glyphW2);
+                routeEntries.push({{
+                  agencyText: agencyText,
+                  nameLines: nameLines,
+                  color: route.color,
+                  colW: colW,
+                  entryH: agencyLineH + 3 * scale
+                    + nameLines.length * routeLineH
+                    + (nameLines.length - 1) * lineGap,
+                }});
+              }});
+            }});
+
+            // Flow the fixed-width columns left-to-right, wrapping onto
+            // new rows; each row's height is set by its tallest entry.
+            const legendRows = [];
+            let curRow = [];
+            let curW = 0;
+            routeEntries.forEach(function(e) {{
+              const addW = colW + (curRow.length ? colGapX : 0);
+              if (curRow.length && curW + addW > routesMaxRowW) {{
+                legendRows.push(curRow);
+                curRow = [];
+                curW = 0;
+              }}
+              curW += colW + (curRow.length ? colGapX : 0);
+              curRow.push(e);
+            }});
+            if (curRow.length) legendRows.push(curRow);
+
+            const rowHeights = legendRows.map(function(r) {{
+              return Math.max.apply(null, r.map(function(e) {{ return e.entryH; }}));
+            }});
+
+            let colW1 = textWAt('Routes', headFs, '700');
+            legendRows.forEach(function(r) {{
+              const rowW = r.length * colW + (r.length - 1) * colGapX;
+              colW1 = Math.max(colW1, rowW);
+            }});
+            const routesBlockH = rowHeights.length
+              ? rowHeights.reduce(function(a, b) {{ return a + b; }}, 0)
+                + (rowHeights.length - 1) * colGapY
+              : 0;
+
+            // Measure Symbols column.
+            let colW2 = textWAt('Symbols', headFs, '700');
+            legendData.symbols.forEach(function(symbol) {{
+              colW2 = Math.max(colW2, glyphW + textWAt(symbol.label, fs));
+            }});
+            colW2 += glyphW;
+
+            const symbolsBlockH = legendData.symbols.length * rowH;
+            const boxW = padX * 2 + colW1 + colGap + colW2;
+            const boxH = padTop * 2 + headFs + gap + Math.max(routesBlockH, symbolsBlockH);
+            const boxX = 18 * scale;
+            const boxY = canvas.height - boxH - 14 * scale;
+
+            ctx.fillStyle = 'rgba(255,255,255,0.97)';
+            ctx.fillRect(boxX, boxY, boxW, boxH);
+            ctx.strokeStyle = '#d0d0d0';
+            ctx.lineWidth = 1 * scale;
+            ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+            ctx.textAlign = 'left';
+            ctx.fillStyle = '#111111';
+            const x1 = boxX + padX;
+            const x2 = x1 + colW1 + colGap;
+            const headY = boxY + padTop + headFs;
+
+            ctx.font = '700 ' + headFs + 'px Arial, sans-serif';
+            ctx.fillText('Routes', x1, headY);
+            ctx.fillText('Symbols', x2, headY);
+
+            let yRow = headY + gap + agencyLineH * 0.8;
+            legendRows.forEach(function(r, rowIdx) {{
+              let xCol = x1;
+              r.forEach(function(e) {{
+                ctx.font = agencyFs + 'px Arial, sans-serif';
+                ctx.fillStyle = '#666666';
+                ctx.fillText(e.agencyText, xCol, yRow);
+
+                const swatchY = yRow + 3 * scale + routeLineH * 0.7;
+                ctx.fillStyle = e.color;
+                ctx.fillRect(xCol, swatchY - 4 * scale, 16 * scale, 4 * scale);
+                ctx.font = routeFs + 'px Arial, sans-serif';
+                ctx.fillStyle = '#222222';
+                e.nameLines.forEach(function(line, lineIdx) {{
+                  ctx.fillText(line, xCol + glyphW2, swatchY + lineIdx * (routeLineH + lineGap));
+                }});
+
+                xCol += e.colW + colGapX;
+              }});
+              yRow += rowHeights[rowIdx] + colGapY;
+            }});
+
+            ctx.font = fs + 'px Arial, sans-serif';
+            let yS = headY + gap + rowH * 0.75;
+            legendData.symbols.forEach(function(symbol) {{
+              const cx = x2 + 8 * scale;
+              if (symbol.type === 'line') {{
+                ctx.fillStyle = symbol.color;
+                ctx.fillRect(x2, yS - 5 * scale, 16 * scale, 4 * scale);
+              }} else if (symbol.type === 'circle') {{
+                ctx.beginPath();
+                ctx.arc(cx, yS - 3.5 * scale, symbol.radius * scale, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffffff';
+                ctx.fill();
+                ctx.strokeStyle = symbol.color;
+                ctx.lineWidth = 2 * scale;
+                ctx.stroke();
+              }}
+              ctx.fillStyle = '#222222';
+              ctx.fillText(symbol.label, x2 + glyphW, yS);
+              yS += rowH;
+            }});
+
+            canvas.toBlob(function(blob) {{
+              if (!blob) {{ alert('PNG export failed.'); return; }}
+              const url = URL.createObjectURL(blob);
+              transitTriggerDownload(url, 'transit_map.png');
+              setTimeout(() => URL.revokeObjectURL(url), 2000);
+            }}, 'image/png');
+          }};
+          mapImg.onerror = function() {{
+            alert('PNG download failed: could not rasterize the map.');
+          }};
+          mapImg.src = mapDataUrl;
+        }} catch (e) {{
+          alert('PNG download failed: ' + e);
+        }}
+      }}
+
+      function transitSetLegendFullWidth(on) {{
+        const legend = document.getElementById('transit-legend');
+        if (on) {{
+          legend.style.left = '0';
+          legend.style.right = '0';
+          legend.style.bottom = '0';
+          legend.style.width = '100%';
+          legend.style.borderRadius = '0';
+          legend.style.justifyContent = 'center';
+          legend.style.padding = '10px 32px';
+        }} else {{
+          legend.style.right = 'auto';
+          legend.style.left = '18px';
+          legend.style.bottom = '14px';
+          legend.style.width = 'auto';
+          legend.style.borderRadius = '0';
+          legend.style.justifyContent = 'flex-start';
+          legend.style.padding = '9px 12px';
+        }}
+      }}
+
+      function transitFullscreen() {{
+        const el = document.getElementById('transit-wrapper');
+        const container = document.getElementById('transit-plot-container');
+        const isFs = document.fullscreenElement || document.webkitFullscreenElement;
+
+        function applyFullscreenStyle(on) {{
+          if (on) {{
+            el.style.position = 'fixed';
+            el.style.top = '0'; el.style.left = '0';
+            el.style.width = '100vw'; el.style.height = '100vh';
+            el.style.zIndex = '99999';
+            el.style.background = '#ffffff';
+            container.style.height = 'calc(100vh - 40px)';
+            container.style.width = '100vw';
+          }} else {{
+            el.style.position = 'relative';
+            el.style.width = 'auto'; el.style.height = 'auto';
+            el.style.zIndex = 'auto';
+            container.style.height = '{height}px';
+            container.style.width = '100%';
+          }}
+          // Legend spans the full width of the screen edge-to-edge only
+          // while in full screen; back to its normal corner box otherwise.
+          transitSetLegendFullWidth(on);
+          setTimeout(transitResizePlot, 200);
+        }}
+
+        if (!isFs) {{
+          const req = el.requestFullscreen || el.webkitRequestFullscreen;
+          if (req) {{
+            req.call(el).then(() => applyFullscreenStyle(true))
+                         .catch(() => applyFullscreenStyle(true));
+          }} else {{
+            applyFullscreenStyle(true);
+          }}
+        }} else {{
+          const exit = document.exitFullscreen || document.webkitExitFullscreen;
+          if (exit) {{ exit.call(document); }}
+          applyFullscreenStyle(false);
+        }}
+      }}
+
+      document.addEventListener('fullscreenchange', () => {{
+        if (!document.fullscreenElement) {{
+          const el = document.getElementById('transit-wrapper');
+          const container = document.getElementById('transit-plot-container');
+          el.style.position = 'relative';
+          el.style.width = 'auto'; el.style.height = 'auto';
+          container.style.height = '{height}px';
+          container.style.width = '100%';
+          transitSetLegendFullWidth(false);
+          transitResizePlot();
+        }}
+      }});
+
+      window.addEventListener('resize', transitResizePlot);
+      setTimeout(transitResizePlot, 200);
+    </script>
+    """
+    st.components.v1.html(html_code, height=height + 60, scrolling=False)
 
 
 
@@ -3190,6 +5100,44 @@ with col_map1:
                     label_visibility="collapsed"
                 )
 
+                selected_landmarks = st.multiselect(
+                    "Vector landmarks",
+                    list(LANDMARKS.keys()),
+                    default=[name for name in DEFAULT_LANDMARKS if name in LANDMARKS],
+                    key="selected_vector_landmarks",
+                    help=(
+                        "Vector landmarks are anchored to geographic coordinates. "
+                        "Their geometry follows the map when zooming and panning."
+                    ),
+                )
+
+                if selected_landmarks:
+                    show_landmark_status = st.checkbox(
+                        "🔍 Show landmark icon status",
+                        value=False,
+                        key="show_landmark_status",
+                    )
+                    if show_landmark_status:
+                        with st.container(border=True):
+                            for lm_name in selected_landmarks:
+                                lm_record = dict(LANDMARKS.get(lm_name, {}))
+                                lm_record["name"] = lm_name
+                                status = get_landmark_custom_svg_status(lm_record)
+                                if status["ok"]:
+                                    st.markdown(f"✅ **{lm_name}** — {status['reason']}")
+                                elif lm_record.get("svg"):
+                                    st.markdown(
+                                        f"⚠️ **{lm_name}** — falling back to the "
+                                        f"generic shape. {status['reason']}"
+                                    )
+                                else:
+                                    st.markdown(
+                                        f"ℹ️ **{lm_name}** — no custom SVG set, "
+                                        f"using the built-in shape (normal)."
+                                    )
+
+                landmark_icon_scale = 3.0
+
                 if view_mode == "🗺️ Live Map":
 
                     # ================= INTERSECTION DATA =================
@@ -3395,17 +5343,16 @@ with col_map1:
                         label_density=tm_label_density,
                         show_stop_markers=tm_show_markers,
                         hidden_label_names=tuple(tm_hidden_labels),
+                        selected_landmarks=tuple(selected_landmarks),
+                        landmark_icon_size_deg=0.0026 * landmark_icon_scale,
                     )
 
-                    st.plotly_chart(
+                    display_transit_map(
                         fig_transit,
-                        use_container_width=True,
-                        config={
-                            "scrollZoom": True,
-                            "responsive": True,
-                            "displayModeBar": True,
-                            "displaylogo": False,
-                        }
+                        selected_routes,
+                        route_name_map,
+                        route_color_hex_map,
+                        route_agency_map=route_agency_map,
                     )
 
 
@@ -3483,19 +5430,29 @@ with col_map1:
                         )
                         loom_label_pad = st.slider(
                             "Label padding (px)",
-                            min_value=0, max_value=400, value=150, step=25,
+                            min_value=0, max_value=300, value=100, step=25,
                             key="loom_label_pad",
                         )
                         loom_label_font_scale = st.slider(
                             "Label font size x",
-                            min_value=0.5, max_value=3.0, value=2.0, step=0.1,
+                            min_value=0.75, max_value=3.0, value=2, step=0.05,
                             key="loom_label_font_scale",
                             help="Multiplies the font size in LOOM station labels.",
                         )
                     else:
-                        loom_label_pad = st.session_state.get("loom_label_pad", 150)
+                        loom_label_pad = st.session_state.get("loom_label_pad", 100)
                         loom_label_font_scale = st.session_state.get(
-                            "loom_label_font_scale", 2.0
+                            "loom_label_font_scale", 1.25
+                        )
+
+                    if schematic and selected_landmarks:
+                        st.info(
+                            "In schematic LOOM mode, landmarks are anchored to "
+                            "their nearest transit stop's actual position on the "
+                            "octilinear layout (real lon/lat can't be placed "
+                            "directly, since octi distorts it). A landmark whose "
+                            "nearest stop isn't identifiable in the rendered map "
+                            "is left off rather than placed somewhere misleading."
                         )
 
                     try:
@@ -3508,6 +5465,8 @@ with col_map1:
                                 line_spacing=loom_line_spacing,
                                 label_pad=loom_label_pad,
                                 label_font_scale=loom_label_font_scale,
+                                selected_landmarks=tuple(selected_landmarks),
+                                landmark_icon_size=28 * landmark_icon_scale,
                             )
 
                         display_loom_svg(
