@@ -643,36 +643,6 @@ def _svg_landmark_group(record, x, y, size=28):
     
         inner_match = re.search(r"<svg\b[^>]*>([\s\S]*)</\s*svg\s*>", custom_svg, re.IGNORECASE)
         inner = inner_match.group(1) if inner_match else custom_svg
-        # SVG shapes with no fill default to black, which turned unfilled
-        # paths in some icons (PDS.svg, BDS.svg, ...) into black blobs.
-        # Carry the root svg's fill/stroke attributes into the nested icon
-        # svg so inheritance behaves as the icon's author intended.
-        root_attrs = ""
-        root_match = re.search(r"<svg\b([^>]*)>", custom_svg, re.IGNORECASE)
-        if root_match:
-            for attr_name, attr_value in re.findall(
-                r"\b(fill|stroke|fill-opacity|stroke-opacity|stroke-width)\s*=\s*(\"[^\"]*\"|'[^']*')",
-                root_match.group(1),
-                re.IGNORECASE,
-            ):
-                root_attrs += f" {attr_name}={attr_value}"
-        # If no root fill/stroke survives and shapes carry neither their own
-        # fill nor style, keep them unfilled instead of defaulting to black.
-        if (
-            not root_attrs
-            and re.search(r"<(path|rect|circle|polygon|ellipse)\b", inner, re.IGNORECASE)
-            and not re.search(
-                r"<(path|rect|circle|polygon|ellipse)\b[^>]*?(\bfill\s*=|\bstyle\s*=|\bclass\s*=)",
-                inner,
-                re.IGNORECASE,
-            )
-        ):
-            inner = re.sub(
-                r"<(path|rect|circle|polygon|ellipse)\b",
-                r'<\1 fill="none"',
-                inner,
-                flags=re.IGNORECASE,
-            )
         shapes = (
             f'<svg x="{x-hx:.3f}" y="{y-hy:.3f}" width="{s:.3f}" height="{s:.3f}" '
             f'{vb_attr} preserveAspectRatio="xMidYMid meet">{inner}</svg>'
@@ -3519,20 +3489,6 @@ def add_route_title_to_svg(
     return svg
 
 
-def _has_landmark_icons(root):
-    """True if the SVG contains the landmark-icon groups inject_landmarks
-    adds (class="loom-landmark"). Used by build_composite_svg to widen the
-    crop margin so icons near the map edge are not sliced off."""
-    try:
-        for el in root.iter():
-            cls = (el.get('class') or '')
-            if 'loom-landmark' in cls:
-                return True
-    except AttributeError:
-        pass
-    return False
-
-
 def _content_y_bounds(root):
     """Best-effort TIGHT bounding box (in the SVG's own coordinate
     space) of everything actually drawn inside root. Returns
@@ -3673,11 +3629,7 @@ def build_composite_svg(
         # (see _content_y_bounds' docstring) so a small map doesn't sit
         # inside a big empty box -- keep a modest fixed margin around the
         # real content instead of the full, size-independent pad.
-        # When landmark icons are present, use a wider margin: they sit at
-        # the outer edge of the drawn content and are relatively large
-        # glyphs, so the 24px text margin used to slice them off at the
-        # map edge ("icon is cut off").
-        content_margin = 90 if _has_landmark_icons(inner_root) else 24
+        content_margin = 24
         bounds = _content_y_bounds(inner_root)
         if bounds:
             x_min, y_min, x_max, y_max = bounds
@@ -3831,10 +3783,7 @@ def build_composite_svg(
 </svg>'''
 
 
-def display_loom_svg(
-    svg, selected_routes, route_name_map, route_color_hex_map,
-    route_agency_map=None,
-):
+def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None):
 
     encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
 
@@ -4901,7 +4850,7 @@ def img_to_base64(path):
             return base64.b64encode(f.read()).decode()
     except FileNotFoundError:
         return ""
-img = img_to_base64("image.png")
+img = img_to_base64("KTM Vallery.png")
 
 # ================= TOP CONTAINER (HERO BANNER) =================
 with st.container(border=True):
@@ -4918,10 +4867,9 @@ with st.container(border=True):
                     padding: 1rem;
                     width: 100%;
                 }}
-                
                 .hero-img {{
                     max-width: 100%;
-                    max-height: 300px; /* Limits height so it doesn't push data too far down */
+                    max-height: 350px; /* Limits height so it doesn't push data too far down */
                     border-radius: 12px;
                     object-fit: cover;
                     margin-bottom: 1.5rem;
@@ -5162,6 +5110,32 @@ with col_map1:
                         "Their geometry follows the map when zooming and panning."
                     ),
                 )
+
+                if selected_landmarks:
+                    show_landmark_status = st.checkbox(
+                        "🔍 Show landmark icon status",
+                        value=False,
+                        key="show_landmark_status",
+                    )
+                    if show_landmark_status:
+                        with st.container(border=True):
+                            for lm_name in selected_landmarks:
+                                lm_record = dict(LANDMARKS.get(lm_name, {}))
+                                lm_record["name"] = lm_name
+                                status = get_landmark_custom_svg_status(lm_record)
+                                if status["ok"]:
+                                    st.markdown(f"✅ **{lm_name}** — {status['reason']}")
+                                elif lm_record.get("svg"):
+                                    st.markdown(
+                                        f"⚠️ **{lm_name}** — falling back to the "
+                                        f"generic shape. {status['reason']}"
+                                    )
+                                else:
+                                    st.markdown(
+                                        f"ℹ️ **{lm_name}** — no custom SVG set, "
+                                        f"using the built-in shape (normal)."
+                                    )
+
                 landmark_icon_scale = 3.0
 
                 if view_mode == "🗺️ Live Map":
@@ -5456,19 +5430,19 @@ with col_map1:
                         )
                         loom_label_pad = st.slider(
                             "Label padding (px)",
-                            min_value=0, max_value=400, value=150, step=25,
+                            min_value=0, max_value=300, value=100, step=25,
                             key="loom_label_pad",
                         )
                         loom_label_font_scale = st.slider(
                             "Label font size x",
-                            min_value=0.75, max_value=3.0, value=1.5, step=0.05,
+                            min_value=0.75, max_value=3.0, value=2, step=0.05,
                             key="loom_label_font_scale",
                             help="Multiplies the font size in LOOM station labels.",
                         )
                     else:
-                        loom_label_pad = st.session_state.get("loom_label_pad", 150)
+                        loom_label_pad = st.session_state.get("loom_label_pad", 100)
                         loom_label_font_scale = st.session_state.get(
-                            "loom_label_font_scale", 1.5
+                            "loom_label_font_scale", 1.25
                         )
 
                     if schematic and selected_landmarks:
@@ -5499,7 +5473,6 @@ with col_map1:
                             svg,
                             selected_routes,
                             route_name_map,
-                            route_color_hex_map,
                             route_agency_map,
                         )
                         st.success("LOOM map generated successfully.")
