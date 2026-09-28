@@ -19,7 +19,6 @@ import html
 import shlex
 import re
 import math
-import hashlib
 import platform
 import xml.etree.ElementTree as ET
 
@@ -508,8 +507,8 @@ LANDMARKS = {
     "UN Park": {"lat":27.6854334117676, "lon":85.3257565314652, "svg": "icon/ic_baseline-park.svg"},
     "Kathmandu Fun Park": {"lat": 27.701374732249555, "lon": 85.32040843415382,"svg": "icon/park.svg"},
     "ZOO": {"lat": 27.672943662412717, "lon":  85.31179605885961,"svg": "icon/zoo.svg"},
-    "Bir Hospital": {"lat": 27.707979621014402, "lon": 85.31301004680573, "svg": "icon/hospital.svg"},
-    "Basantapur  Durbar Square": {"lat": 27.70437922513459, "lon": 85.30642066943844, "svg": "icon/BDS.svg"},
+    "Bir Hospital": {"lat": 27.705641517753943, "lon": 85.31286308128226, "svg": "icon/hospital.svg"},
+    "Basantapur  Durbar Square": {"lat": 27.70429180598546, "lon": 85.30745144002829, "svg": "icon/Group 347.svg"},
     "Patan Durbar Square": {"lat": 27.672660069722838, "lon":  85.32555712962338, "svg": "icon/PDS.svg"},
 }
 DEFAULT_LANDMARKS = tuple(LANDMARKS.keys())
@@ -642,28 +641,41 @@ def _svg_landmark_group(record, x, y, size=28):
             if vb else 'viewBox="0 0 100 100"'
         )
     
-        m_root = re.search(r"<svg\b([^>]*)>([\s\S]*)</\s*svg\s*>", custom_svg, re.IGNORECASE)
-        root_attrs, inner = (m_root.group(1), m_root.group(2)) if m_root else ("", custom_svg)
-
-        # Keep inheritable presentation attrs from the icon's own root <svg>
-        # (e.g. fill="none" on Figma exports -- dropping it turned stroke-only
-        # paths into solid black blobs). Drop only layout attrs we override.
-        root_attrs = re.sub(
-            r'\s(?:x|y|width|height|viewBox|preserveAspectRatio|version|xmlns(?::\w+)?)'
-            r'\s*=\s*("[^"]*"|\'[^\']*\')',
-            "", root_attrs, flags=re.IGNORECASE)
-
-        # Namespace ids so filters/masks/gradients from different icons
-        # can't collide inside the shared map document.
-        uid = "lm" + hashlib.md5(str(record["name"]).encode("utf-8")).hexdigest()[:6]
-        inner = re.sub(r'\bid="([^"]+)"', lambda mm: f'id="{uid}-{mm.group(1)}"', inner)
-        inner = re.sub(r'url\(#([^)]+)\)', lambda mm: f'url(#{uid}-{mm.group(1)})', inner)
-        inner = re.sub(r'(xlink:href|href)="#([^"]+)"',
-                       lambda mm: f'{mm.group(1)}="#{uid}-{mm.group(2)}"', inner)
-
+        inner_match = re.search(r"<svg\b[^>]*>([\s\S]*)</\s*svg\s*>", custom_svg, re.IGNORECASE)
+        inner = inner_match.group(1) if inner_match else custom_svg
+        # SVG shapes with no fill default to black, which turned unfilled
+        # paths in some icons (PDS.svg, BDS.svg, ...) into black blobs.
+        # Carry the root svg's fill/stroke attributes into the nested icon
+        # svg so inheritance behaves as the icon's author intended.
+        root_attrs = ""
+        root_match = re.search(r"<svg\b([^>]*)>", custom_svg, re.IGNORECASE)
+        if root_match:
+            for attr_name, attr_value in re.findall(
+                r"\b(fill|stroke|fill-opacity|stroke-opacity|stroke-width)\s*=\s*(\"[^\"]*\"|'[^']*')",
+                root_match.group(1),
+                re.IGNORECASE,
+            ):
+                root_attrs += f" {attr_name}={attr_value}"
+        # If no root fill/stroke survives and shapes carry neither their own
+        # fill nor style, keep them unfilled instead of defaulting to black.
+        if (
+            not root_attrs
+            and re.search(r"<(path|rect|circle|polygon|ellipse)\b", inner, re.IGNORECASE)
+            and not re.search(
+                r"<(path|rect|circle|polygon|ellipse)\b[^>]*?(\bfill\s*=|\bstyle\s*=|\bclass\s*=)",
+                inner,
+                re.IGNORECASE,
+            )
+        ):
+            inner = re.sub(
+                r"<(path|rect|circle|polygon|ellipse)\b",
+                r'<\1 fill="none"',
+                inner,
+                flags=re.IGNORECASE,
+            )
         shapes = (
             f'<svg x="{x-hx:.3f}" y="{y-hy:.3f}" width="{s:.3f}" height="{s:.3f}" '
-            f'{vb_attr} preserveAspectRatio="xMidYMid meet"{root_attrs}>{inner}</svg>'
+            f'{vb_attr} preserveAspectRatio="xMidYMid meet">{inner}</svg>'
         )
     else:
         kind = record.get("kind", "monument")
@@ -876,177 +888,41 @@ def _find_svg_station_anchor(landmark_record, route_stops, svg_labels):
     return None
 
 
-def _extract_svg_station_markers(svg):
-    """Centres of the drawn station markers (the actual bus-stop symbols).
-
-    A station *label* is a text path that can be a hundred+ units long, so
-    its centroid can sit far from the stop it names. Anchoring landmarks to
-    the marker itself keeps the icon next to the real stop.
-    """
-    try:
-        root = ET.fromstring(svg)
-    except ET.ParseError:
-        return []
-    markers = []
-    for el in root.iter():
-        tag = el.tag.split('}')[-1] if '}' in el.tag else el.tag
-        cls = (el.get('class') or '').lower()
-        if 'station' not in cls or 'label' in cls:
-            continue
-        if tag not in ('path', 'circle', 'ellipse', 'polygon', 'rect'):
-            continue
-        try:
-            if tag in ('circle', 'ellipse'):
-                markers.append((float(el.get('cx')), float(el.get('cy'))))
-                continue
-            if tag == 'rect':
-                x0, y0 = float(el.get('x')), float(el.get('y'))
-                nums = [x0, y0, x0 + float(el.get('width')), y0 + float(el.get('height'))]
-            else:
-                raw = el.get('d') if tag == 'path' else el.get('points')
-                nums = [float(n) for n in re.findall(r'-?\d+\.?\d*(?:[eE][-+]?\d+)?', raw or '')]
-        except (TypeError, ValueError):
-            continue
-        if len(nums) < 4:
-            continue
-        xs, ys = nums[0::2], nums[1::2]
-        markers.append(((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0))
-    return markers
-
-
-def _snap_label_to_marker(label, markers):
-    """Position of the stop a label names: nearest station marker to the
-    label's end points, else the label's start point (text starts next to
-    its stop), else its centroid."""
-    ends = label.get("ends")
-    if not ends:
-        return float(label["cx"]), float(label["cy"])
-    x0, y0, x1, y1 = ends
-    if markers:
-        label_len = math.hypot(x1 - x0, y1 - y0)
-        best = None
-        for mx, my in markers:
-            d = min(math.hypot(mx - x0, my - y0), math.hypot(mx - x1, my - y1))
-            if best is None or d < best[0]:
-                best = (d, mx, my)
-        if best is not None and best[0] <= 0.5 * label_len + 80:
-            return best[1], best[2]
-    return x0, y0
-
-
-def _find_svg_landmark_anchor(landmark_record, route_stops, svg_labels, k=5, markers=None):
-    """Rendered position of the landmark's nearest selected-route stop.
-
-    Uses that single nearest stop (no blending of several stops -- a blend
-    of stops that the octilinear layout has spread apart lands nowhere near
-    any real stop). `k` is kept only for call compatibility.
-    """
+def _find_svg_landmark_anchor(landmark_record, route_stops, svg_labels, k=5):
+    """Estimate an octilinear landmark position from several nearby stops."""
     if not route_stops or not svg_labels:
         return None
     label_by_name = {}
     for label in svg_labels:
         key = _normalize_stop_name_for_match(label.get("text", ""))
         if key and key not in label_by_name:
-            label_by_name[key] = label
+            try:
+                label_by_name[key] = (float(label["cx"]), float(label["cy"]))
+            except (TypeError, ValueError):
+                pass
     lon, lat = float(landmark_record["lon"]), float(landmark_record["lat"])
     coslat = math.cos(math.radians(lat))
-    best = None
+    candidates = []
     for stop in route_stops:
-        label = label_by_name.get(_normalize_stop_name_for_match(stop.get("name", "")))
-        if label is None:
+        pos = label_by_name.get(_normalize_stop_name_for_match(stop.get("name", "")))
+        if pos is None:
             continue
         try:
             slon, slat = float(stop["lon"]), float(stop["lat"])
         except (TypeError, ValueError):
             continue
-        dx, dy = (slon - lon) * coslat, slat - lat
-        d2 = dx * dx + dy * dy
-        if best is None or d2 < best[0]:
-            best = (d2, label)
-    if best is None:
+        dx, dy = (slon-lon)*coslat, slat-lat
+        candidates.append((dx*dx + dy*dy, pos[0], pos[1]))
+    if not candidates:
         return None
-    try:
-        return _snap_label_to_marker(best[1], markers or [])
-    except (TypeError, ValueError, KeyError):
-        return None
-
-
-def _schematic_landmark_position(record, route_stops, svg_labels, markers, k=5):
-    """Where a landmark belongs on the octilinear map, from its REAL position
-    relative to nearby stops.
-
-    Snapping to the single nearest stop can't express "between Gaushala and
-    Pingalasthan" or "a bit east of Chabahil". Instead, fit a small local
-    similarity transform (scale + rotation + shift, weighted toward the
-    closest stops) from real lon/lat to the drawn stop positions, and map the
-    landmark through it. A landmark that is between two stops therefore lands
-    between them; one that is a bit off to a side lands a bit off to that side.
-
-    Returns ((x, y), (nearest_stop_x, nearest_stop_y)) or None.
-    """
-    if not route_stops or not svg_labels:
-        return None
-    label_by_name = {}
-    for label in svg_labels:
-        key = _normalize_stop_name_for_match(label.get("text", ""))
-        if key and key not in label_by_name:
-            label_by_name[key] = label
-    lon, lat = float(record["lon"]), float(record["lat"])
-    coslat = math.cos(math.radians(lat))
-    pts, seen = [], set()
-    for stop in route_stops:
-        key = _normalize_stop_name_for_match(stop.get("name", ""))
-        if not key or key in seen or key not in label_by_name:
-            continue
-        try:
-            slon, slat = float(stop["lon"]), float(stop["lat"])
-            sx, sy = _snap_label_to_marker(label_by_name[key], markers or [])
-        except (TypeError, ValueError, KeyError):
-            continue
-        seen.add(key)
-        gx, gy = (slon - lon) * coslat, slat - lat
-        pts.append((gx * gx + gy * gy, gx, gy, float(sx), float(sy)))
-    if not pts:
-        return None
-    pts.sort(key=lambda v: v[0])
-    near = pts[:max(2, k)]
-    nearest_xy = (near[0][3], near[0][4])
-    if len(near) < 2:
-        return nearest_xy, nearest_xy
-
-    # Complex weighted least squares:  s = a*g + t  (g = real offset from the
-    # landmark in east/north, s = drawn position with y flipped for screen).
-    d0 = 0.002 ** 2  # ~200 m softening so one very close stop can't dominate
-    ws = [1.0 / (v[0] + d0) for v in near]
-    gs = [complex(v[1], v[2]) for v in near]
-    ss = [complex(v[3], -v[4]) for v in near]
-    wsum = sum(ws)
-    gbar = sum(w * g for w, g in zip(ws, gs)) / wsum
-    sbar = sum(w * t for w, t in zip(ws, ss)) / wsum
-    den = sum(w * abs(g - gbar) ** 2 for w, g in zip(ws, gs))
-    if den < 1e-18:
-        return nearest_xy, nearest_xy
-    a = sum(w * (g - gbar).conjugate() * (t - sbar)
-            for w, g, t in zip(ws, gs, ss)) / den
-    pred = sbar - a * gbar          # landmark is at g = 0
-    return (pred.real, -pred.imag), nearest_xy
-
-
-def _clamp_shift(base_x, base_y, x, y, max_shift):
-    """Clamp (x, y) so its total displacement from (base_x, base_y) never
-    exceeds max_shift. Line-avoidance nudges keep wanting to push icons
-    further and further away on dense maps; but the icon must stay near
-    its real anchor (nearest stop / true coordinate), otherwise the dotted
-    leader line gets so long the icon appears to belong somewhere else.
-    Prefer proximity to the anchor over being perfectly clear of lines:
-    sitting slightly on a line is much less misleading than being far off.
-    """
-    dx, dy = x - base_x, y - base_y
-    dist = math.hypot(dx, dy)
-    if dist <= max_shift or dist == 0:
-        return x, y
-    scale = max_shift / dist
-    return base_x + dx * scale, base_y + dy * scale
+    candidates.sort(key=lambda v: v[0])
+    if candidates[0][0] < 1e-10:
+        return candidates[0][1], candidates[0][2]
+    nearby = candidates[:min(k, len(candidates))]
+    weights = [1.0/max(v[0],1e-10) for v in nearby]
+    total = sum(weights)
+    return (sum(w*v[1] for w,v in zip(weights,nearby))/total,
+            sum(w*v[2] for w,v in zip(weights,nearby))/total)
 
 
 def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
@@ -1079,7 +955,6 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
         return svg
 
     svg_labels = get_svg_label_texts(svg)
-    markers = _extract_svg_station_markers(svg)
     segments = _extract_svg_polyline_segments(svg)
 
     # Keep the icon comfortably smaller than the whole map canvas. With the
@@ -1110,117 +985,22 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
     def geo_to_svg(lon, lat):
         return (vx + ((lon-lon_min)/lon_span)*vw, vy + ((lat_max-lat)/lat_span)*vh)
 
-    # Obstacles an icon should not sit on: drawn lines, OTHER stops' markers
-    # and station-name text. Label text is approximated by its base path.
-    label_segments = []
-    for lab in svg_labels:
-        ends = lab.get("ends")
-        if ends:
-            label_segments.append(tuple(ends))
-
-    def _placement_cost(px, py, dist, placed_xy, own_base):
-        """Lower is better. Penalises overlap with lines, stop markers,
-        station names and already-placed icons, plus a pull toward the
-        nearest stop so the icon never wanders out into empty space --
-        an icon far from every stop looks like it belongs somewhere else,
-        which is worse than sitting close beside a line."""
-        cost = 0.6 * dist / eff_size
-        # Distance from the landmark's own nearest stop (own_base): anything
-        # beyond ~1.5 icon widths from it ramps up sharply, so candidates
-        # hugging the stop always beat far-away clear spots.
-        d_base = math.hypot(px - own_base[0], py - own_base[1])
-        cost += 1.2 * max(0.0, d_base - eff_size * 1.5) / eff_size
-        line_clear = eff_size * 0.5 + 3.0
-        for (ax, ay, bx2, by2) in segments:
-            d, _n = _point_segment_dist_and_normal(px, py, ax, ay, bx2, by2)
-            if d < line_clear:
-                cost += 8.0 * (line_clear - d) / eff_size  # strongly avoid covering transit lines
-        label_clear = eff_size * 0.5
-        for (ax, ay, bx2, by2) in label_segments:
-            d, _n = _point_segment_dist_and_normal(px, py, ax, ay, bx2, by2)
-            if d < label_clear:
-                cost += 0.6 * (label_clear - d) / eff_size
-        marker_clear = eff_size * 0.62
-        for (mx, my) in markers:
-            d = math.hypot(px - mx, py - my)
-            if d < marker_clear:
-                cost += 1.5 * (marker_clear - d) / eff_size
-        icon_clear = eff_size * 1.1
-        for (ox, oy) in placed_xy:
-            d = math.hypot(px - ox, py - oy)
-            if d < icon_clear:
-                cost += 4.0 * (icon_clear - d) / eff_size
-        return cost
-
-    # Candidate spots: 8 directions (octilinear-friendly) at a few short
-    # distances. The smallest distance is already far enough that the icon
-    # doesn't sit on top of its own stop marker/name.
-    directions = [(math.cos(math.radians(a)), math.sin(math.radians(a)))
-                  for a in range(0, 360, 45)]
-    distances = [eff_size * f for f in (0.85, 1.05, 1.3, 1.6)]
-
     placements = []
-    placed_xy = []
     for record in records:
         if schematic:
-            # Octilinear (schematic) map only: anchor to the drawn stop and
-            # pick the clearest nearby spot (see _placement_cost).
-            res = _schematic_landmark_position(
-                record, route_stops, svg_labels, markers, k=5)
-            if res is None:
+            anchor = _find_svg_landmark_anchor(record, route_stops, svg_labels, k=5)
+            if anchor is None:
                 continue
-            (px, py), (base_x, base_y) = res
-            # Never let the estimate wander far from the nearest real stop.
-            # A bad prediction (poorly-conditioned octilinear layout) must
-            # collapse back onto the stop instead of landing in empty space.
-            far = math.hypot(px - base_x, py - base_y)
-            max_far = eff_size * 2.0
-            if far > max_far:
-                px = base_x + (px - base_x) * max_far / far
-                py = base_y + (py - base_y) * max_far / far
-
-            # Candidate spots around the estimated position: both sides of the
-            # nearest line (so the icon sits BESIDE the line, at the same place
-            # along it) plus 8 compass directions.
-            cands = [(0.0, 0.0)]
-            nd, nn = None, (0.0, 1.0)
-            for (ax, ay, bx2, by2) in segments:
-                d, nrm = _point_segment_dist_and_normal(px, py, ax, ay, bx2, by2)
-                if nd is None or d < nd:
-                    nd, nn = d, nrm
-            for f in (0.7, 0.95, 1.25, 1.6):
-                cands.append((nn[0] * f * eff_size, nn[1] * f * eff_size))
-                cands.append((-nn[0] * f * eff_size, -nn[1] * f * eff_size))
-            for f in (0.7, 1.1, 1.5):
-                for ux, uy in directions:
-                    cands.append((ux * f * eff_size, uy * f * eff_size))
-            best = None
-            for ox, oy in cands:
-                cx_, cy_ = px + ox, py + oy
-                c = _placement_cost(cx_, cy_, math.hypot(ox, oy), placed_xy, (base_x, base_y))
-                if best is None or c < best[0]:
-                    best = (c, cx_, cy_)
-            _, x, y = best
-            # Leader line only when the icon is noticeably away from the stop.
-            placements.append((record, x, y, base_x, base_y,
-                               math.hypot(x - base_x, y - base_y) > eff_size * 0.9))
-            placed_xy.append((x, y))
+            base_x, base_y = anchor
         else:
-            # Geographic (non-schematic) map: ORIGINAL behaviour, unchanged.
             base_x, base_y = geo_to_svg(record["lon"], record["lat"])
-            max_shift = eff_size * 1.25
-            x, y, moved = _clear_landmark_of_lines(
-                base_x, base_y, segments, eff_size * 1.6
-            )
-            x, y = _clamp_shift(base_x, base_y, x, y, max_shift)
-            placements.append((record, x, y, base_x, base_y, moved))
+        x, y, moved = _clear_landmark_of_lines(
+            base_x, base_y, segments, eff_size * 1.6
+        )
+        placements.append((record, x, y, base_x, base_y, moved))
 
-    # Spread icons apart on BOTH map types. In schematic mode several
-    # landmarks can resolve to nearly the same drawn stop, and stacking
-    # them un-separated renders as a solid black blob (multiple opaque
-    # SVG icons on top of each other). _separate_landmark_icons clamps
-    # every icon to within ~1.25 icon-widths of its OWN stop, so icons
-    # stay at their respective stops while no longer overlapping.
+    # After clearing transit lines, spread icons apart so two landmarks
+    # never render on top of each other.
     canvas_limit = max(vx + vw, vy + vh) * 2.0
     _separate_landmark_icons(placements, eff_size, segments, canvas_limit)
 
@@ -1235,10 +1015,7 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
 
     parts = []
     for record, x, y, base_x, base_y, moved in placements:
-        # Dotted leader line only on the GEOGRAPHIC map. On the octilinear
-        # (schematic) map the icon sits at/near its own stop, so the line
-        # is just clutter there.
-        if moved and not schematic:
+        if moved:
             parts.append(
                 f'<line x1="{base_x:.3f}" y1="{base_y:.3f}" '
                 f'x2="{x:.3f}" y2="{y:.3f}" '
@@ -1306,8 +1083,8 @@ def _separate_landmark_icons(placements, icon_size, segments, max_push):
             nx = x_i + ux * step
             ny = y_i + uy * step
             nx, ny, moved = _clear_landmark_of_lines(nx, ny, segments, icon_size)
-            # Stay near THIS icon's own anchor, not just inside the canvas.
-            nx, ny = _clamp_shift(bx_i, by_i, nx, ny, icon_size * 1.25)
+            nx = max(-max_push, min(max_push, nx))
+            ny = max(-max_push, min(max_push, ny))
             x_i, y_i = nx, ny
             moved_i = moved_i or moved
             moved_any = True
@@ -1329,13 +1106,11 @@ def _separate_landmark_icons(placements, icon_size, segments, max_push):
                 angle = 2 * math.pi * k / len(cluster)
                 tx = cx + math.cos(angle) * ring_r
                 ty = cy + math.sin(angle) * ring_r
+                tx, ty, moved = _clear_landmark_of_lines(tx, ty, segments, icon_size)
+                tx = max(-max_push, min(max_push, tx))
+                ty = max(-max_push, min(max_push, ty))
                 idx = by_index[id(p)]
                 rec, _, _, bx, by, mvd = placements[idx]
-                tx, ty, moved = _clear_landmark_of_lines(tx, ty, segments, icon_size)
-                # Fan out only a little, and never far from this icon's
-                # own stop (bx, by were previously used before assignment).
-                tx, ty = _clamp_shift(cx, cy, tx, ty, min_gap * 1.15)
-                tx, ty = _clamp_shift(bx, by, tx, ty, min_gap * 1.6)
                 placements[idx] = (rec, tx, ty, bx, by, mvd or moved)
                 moved_any = True
     return moved_any
@@ -1487,16 +1262,6 @@ def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.002
         icon_lon, icon_lat, moved = _clear_landmark_of_lines(
             true_lon, true_lat, segments, icon_size_deg
         )
-        # Same anti-drift cap as the LOOM map: the icon may shift only a
-        # little over one icon width from its real position, so the dotted
-        # leader line stays short and the icon reads as "near this stop".
-        max_shift_deg = icon_size_deg * 1.25
-        d_lon = icon_lon - true_lon
-        d_lat = icon_lat - true_lat
-        shift = math.hypot(d_lon, d_lat)
-        if shift > max_shift_deg:
-            icon_lon = true_lon + d_lon * (max_shift_deg / shift)
-            icon_lat = true_lat + d_lat * (max_shift_deg / shift)
 
         if moved:
             fig.add_shape(
@@ -3560,7 +3325,6 @@ def get_svg_label_texts(svg):
             continue
 
         cx = cy = None
-        ends = None
         for tp in text:
             if tag_local(tp) == 'textPath':
                 href = tp.get(xlink_href) or tp.get('href')
@@ -3572,7 +3336,6 @@ def get_svg_label_texts(svg):
                         xs = [float(a) for _, a, b in segs]
                         ys = [float(b) for _, a, b in segs]
                         cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
-                        ends = (xs[0], ys[0], xs[-1], ys[-1])
 
         if cx is None:
             try:
@@ -3580,7 +3343,7 @@ def get_svg_label_texts(svg):
             except (TypeError, ValueError):
                 cx, cy = 0.0, 0.0
 
-        labels.append({'text': label_text, 'cx': cx, 'cy': cy, 'ends': ends})
+        labels.append({'text': label_text, 'cx': cx, 'cy': cy})
 
     return labels
 
@@ -3729,14 +3492,6 @@ def generate_loom_svg(
     if schematic:
         svg = orient_octilinear_labels(svg)
 
-    # Trim very long station names ("... Bus Stop3" suffixes etc.). Done on
-    # BOTH map types -- long labels are the single biggest source of clutter
-    # and of edge-clipping -- but with a tighter limit on the octilinear
-    # map, where label space along the lines is much more constrained.
-    # The full original name is preserved in a <title> child, so hover
-    # tooltips still show the complete name.
-    svg = shorten_station_labels(svg, max_chars=14 if schematic else 24)
-
     if selected_landmarks:
         svg = add_landmarks_to_loom_svg(
             svg,
@@ -3764,6 +3519,20 @@ def add_route_title_to_svg(
     return svg
 
 
+def _has_landmark_icons(root):
+    """True if the SVG contains the landmark-icon groups inject_landmarks
+    adds (class="loom-landmark"). Used by build_composite_svg to widen the
+    crop margin so icons near the map edge are not sliced off."""
+    try:
+        for el in root.iter():
+            cls = (el.get('class') or '')
+            if 'loom-landmark' in cls:
+                return True
+    except AttributeError:
+        pass
+    return False
+
+
 def _content_y_bounds(root):
     """Best-effort TIGHT bounding box (in the SVG's own coordinate
     space) of everything actually drawn inside root. Returns
@@ -3784,80 +3553,12 @@ def _content_y_bounds(root):
     """
     ys = []
     xs = []
-    num_re = re.compile(r'-?\d*\.?\d+(?:[eE][-+]?\d+)?')
-    tok_re = re.compile(r'[A-Za-z]|-?\d*\.?\d+(?:[eE][-+]?\d+)?')
-    # Elements that never paint anything themselves (their geometry is only
-    # a clip/mask/pattern definition) -- counting them, or anything inside
-    # them, inflated the "content" box and left big empty margins around
-    # the exported map.
-    non_painting = {'clipPath', 'mask', 'pattern', 'marker', 'symbol',
-                    'linearGradient', 'radialGradient', 'style', 'title', 'desc'}
-    arg_count = {'M': 2, 'L': 2, 'T': 2, 'H': 1, 'V': 1,
-                 'C': 6, 'S': 4, 'Q': 4, 'A': 7}
+    num_re = re.compile(r'-?\d+(?:\.\d+)?(?:e-?\d+)?', re.IGNORECASE)
 
     def local(tag):
         return tag.split('}')[-1] if '}' in tag else tag
 
-    def is_hidden(el):
-        style = (el.get('style') or '').replace(' ', '').lower()
-        return (
-            (el.get('visibility') or '').lower() == 'hidden'
-            or (el.get('display') or '').lower() == 'none'
-            or 'visibility:hidden' in style
-            or 'display:none' in style
-        )
-
-    def path_points(d):
-        """Endpoints/control points of a path, with relative commands and
-        H/V/A handled properly (the old 'every number is x,y' reading was
-        wrong for those)."""
-        toks = tok_re.findall(d or '')
-        pts = []
-        cx = cy = sx = sy = 0.0
-        cmd = None
-        i = 0
-        while i < len(toks):
-            t = toks[i]
-            if t.isalpha() and t not in ('e', 'E'):
-                cmd = t
-                i += 1
-                if cmd in 'Zz':
-                    cx, cy = sx, sy
-                continue
-            if cmd is None:
-                break
-            up = cmd.upper()
-            n = arg_count.get(up)
-            if not n or i + n > len(toks):
-                break
-            try:
-                v = [float(x) for x in toks[i:i + n]]
-            except ValueError:
-                break
-            i += n
-            rel = cmd.islower()
-            if up == 'H':
-                cx = cx + v[0] if rel else v[0]
-                pts.append((cx, cy))
-            elif up == 'V':
-                cy = cy + v[0] if rel else v[0]
-                pts.append((cx, cy))
-            else:
-                if up == 'A':
-                    pairs = [(v[5], v[6])]
-                else:
-                    pairs = [(v[k], v[k + 1]) for k in range(0, n, 2)]
-                for px, py in pairs:
-                    if rel:
-                        px, py = cx + px, cy + py
-                    pts.append((px, py))
-                cx, cy = pts[-1]
-                if up == 'M':
-                    sx, sy = cx, cy
-                    cmd = 'l' if rel else 'L'  # extra pairs are implicit lineto
-        return pts
-
-    def walk(el, tx=0.0, ty=0.0, scale=1.0, is_root=False):
+    def walk(el, tx=0.0, ty=0.0, scale=1.0):
         transform = el.get('transform', '') or ''
         for m in re.finditer(r'translate\(\s*(-?[\d.eE+]+)[ ,]+(-?[\d.eE+]+)', transform):
             tx += float(m.group(1)) * scale
@@ -3866,21 +3567,7 @@ def _content_y_bounds(root):
             scale *= float(m.group(1))
 
         tag = local(el.tag)
-        if tag in non_painting or (not is_root and is_hidden(el)):
-            return
         try:
-            if tag == 'svg' and not is_root:
-                # Nested <svg> (the landmark icons): its children live in the
-                # icon's OWN coordinate system (e.g. 0..512), so recursing
-                # put bogus points near the origin into the bounds. Use the
-                # icon's placed box instead and don't descend.
-                x = float(el.get('x', 0))
-                y = float(el.get('y', 0))
-                w_ = float(el.get('width', 0))
-                h_ = float(el.get('height', 0))
-                xs.extend([tx + x * scale, tx + (x + w_) * scale])
-                ys.extend([ty + y * scale, ty + (y + h_) * scale])
-                return
             if tag == 'circle' or tag == 'ellipse':
                 cx = float(el.get('cx', 0))
                 cy = float(el.get('cy', 0))
@@ -3912,109 +3599,24 @@ def _content_y_bounds(root):
                         xs.append(tx + float(x.split(',')[0].split()[0]) * scale)
                     except (ValueError, IndexError):
                         pass
-            elif tag == 'path':
-                for px, py in path_points(el.get('d') or ''):
-                    xs.append(tx + px * scale)
-                    ys.append(ty + py * scale)
-            elif tag in ('polyline', 'polygon'):
-                nums = [float(n) for n in num_re.findall(el.get('points') or '')]
+            elif tag in ('path', 'polyline', 'polygon'):
+                d = el.get('d') or el.get('points') or ''
+                nums = [float(n) for n in num_re.findall(d)]
+                # (x, y) pairs -- even indices are x, odd are y.
                 for i in range(0, len(nums) - 1, 2):
                     xs.append(tx + nums[i] * scale)
-                    ys.append(ty + nums[i + 1] * scale)
-            elif tag == 'line':
-                for kx, ky in (('x1', 'y1'), ('x2', 'y2')):
-                    xs.append(tx + float(el.get(kx, 0)) * scale)
-                    ys.append(ty + float(el.get(ky, 0)) * scale)
+                for i in range(1, len(nums), 2):
+                    ys.append(ty + nums[i] * scale)
         except (ValueError, TypeError):
             pass
 
         for child in list(el):
             walk(child, tx, ty, scale)
 
-    walk(root, is_root=True)
+    walk(root)
     if len(ys) < 2 or len(xs) < 2:
         return None
     return min(xs), min(ys), max(xs), max(ys)
-
-
-def flatten_textpath_labels(svg):
-    """Turn every station-label written with <textPath> into a plain,
-    positioned + rotated <text>.
-
-    Figma, Illustrator and several other SVG importers ignore <textPath>,
-    so an exported SVG opened there shows the map with NO bus-stop names
-    (browsers render them fine, which is why the PNG looked OK). A plain
-    <text x y transform="rotate(...)"> shows up everywhere and stays
-    editable. Position/angle come from the label path LOOM already placed,
-    so the layout is unchanged. Only used for the downloaded SVG.
-    """
-    try:
-        root = ET.fromstring(svg)
-    except ET.ParseError:
-        return svg
-
-    def local(tag):
-        return tag.split('}')[-1] if '}' in tag else tag
-
-    xlink_href = '{http://www.w3.org/1999/xlink}href'
-    path_map = {el.get('id'): el for el in root.iter()
-                if local(el.tag) == 'path' and el.get('id')}
-    pair_re = re.compile(r'([A-Za-z])\s*(-?[\d.eE+]+)[\s,]+(-?[\d.eE+]+)')
-
-    for text in root.iter():
-        if local(text.tag) != 'text' or 'station-label' not in (text.get('class') or ''):
-            continue
-        tp = next((c for c in text if local(c.tag) == 'textPath'), None)
-        if tp is None:
-            continue
-        path_el = path_map.get(((tp.get(xlink_href) or tp.get('href')) or '').split('#')[-1])
-        if path_el is None:
-            continue
-        try:
-            pts = [(float(a), float(b)) for _, a, b in pair_re.findall(path_el.get('d') or '')]
-        except ValueError:
-            continue
-        if len(pts) < 2:
-            continue
-
-        seg = sum(math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
-                  for i in range(len(pts) - 1))
-        (x0, y0), (x1, y1) = pts[0], pts[-1]
-        dx, dy = x1 - x0, y1 - y0
-        chord = math.hypot(dx, dy)
-        if chord < 1e-9:
-            continue
-        ux, uy = dx / chord, dy / chord
-        angle = math.degrees(math.atan2(dy, dx))
-
-        off = 0.0
-        so = (tp.get('startOffset') or '').strip()
-        if so:
-            try:
-                off = seg * float(so[:-1]) / 100.0 if so.endswith('%') else float(so)
-            except ValueError:
-                off = 0.0
-        x, y = x0 + ux * off, y0 + uy * off
-
-        label = ''.join(tp.itertext()).strip()
-        if not label:
-            continue
-        for child in list(text):
-            text.remove(child)
-        for attr in ('textLength', 'lengthAdjust'):
-            text.attrib.pop(attr, None)
-        for k, v in tp.attrib.items():
-            if k not in (xlink_href, 'href', 'startOffset', 'method', 'spacing') \
-                    and text.get(k) is None:
-                text.set(k, v)
-        text.text = label
-        text.set('x', f'{x:.3f}')
-        text.set('y', f'{y:.3f}')
-        rot = f'rotate({angle:.3f} {x:.3f} {y:.3f})'
-        existing = (text.get('transform') or '').strip()
-        text.set('transform', f'{existing} {rot}'.strip())
-
-    return ET.tostring(root, encoding='unicode')
 
 
 def build_composite_svg(
@@ -4071,7 +3673,11 @@ def build_composite_svg(
         # (see _content_y_bounds' docstring) so a small map doesn't sit
         # inside a big empty box -- keep a modest fixed margin around the
         # real content instead of the full, size-independent pad.
-        content_margin = 24
+        # When landmark icons are present, use a wider margin: they sit at
+        # the outer edge of the drawn content and are relatively large
+        # glyphs, so the 24px text margin used to slice them off at the
+        # map edge ("icon is cut off").
+        content_margin = 90 if _has_landmark_icons(inner_root) else 24
         bounds = _content_y_bounds(inner_root)
         if bounds:
             x_min, y_min, x_max, y_max = bounds
@@ -4246,14 +3852,6 @@ def display_loom_svg(
         composite_svg.encode("utf-8")
     ).decode("ascii")
 
-    # Downloaded SVG only: plain <text> labels instead of <textPath>, so bus-stop
-    # names also show up when the file is opened in Figma / Illustrator.
-    try:
-        export_svg = flatten_textpath_labels(composite_svg)
-    except Exception:
-        export_svg = composite_svg
-    export_b64 = base64.b64encode(export_svg.encode("utf-8")).decode("ascii")
-
     # Pull the composite's own declared size so the on-screen viewer can
     # size itself to the map's real aspect ratio (see loomFitContainer
     # below) instead of guessing from a rendered element.
@@ -4382,7 +3980,6 @@ def display_loom_svg(
       // Base64 of the raw LOOM transit map SVG — exports are just the map,
       // with no extra title or legend baked in.
       const loomCompositeSvgDataUrl = "data:image/svg+xml;base64,{composite_b64}";
-      const loomExportSvgDataUrl = "data:image/svg+xml;base64,{export_b64}";
 
       // The composite's own aspect ratio (map + title + legend), used
       // below to size the viewer so the whole map is visible on load
@@ -4584,7 +4181,7 @@ def display_loom_svg(
       // Export the bare transit map (same SVG displayed on screen).
       async function loomDownloadSVG() {{
         try {{
-          const res = await fetch(loomExportSvgDataUrl);
+          const res = await fetch(loomCompositeSvgDataUrl);
           const blob = await res.blob();
           const url = URL.createObjectURL(blob);
           loomTriggerDownload(url, 'loom_transit_map.svg');
@@ -5313,28 +4910,28 @@ with st.container(border=True):
             f"""
             <style>
                 .hero-container {{
-                    width: 100%;
-                    padding: 0;
-                    margin: 0;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
                     text-align: center;
-                }}
-                .hero-img {{
-                    display: block;
+                    padding: 1rem;
                     width: 100%;
-                    height: 315px;
-                    max-width: none;
-                    max-height: none;
+                }}
+                
+                .hero-img {{
+                    max-width: 100%;
+                    max-height: 300px; /* Limits height so it doesn't push data too far down */
+                    border-radius: 12px;
                     object-fit: cover;
-                    object-position: center;
-                    border-radius: 14px;
-                    margin: 0 0 1.4rem 0;
+                    margin-bottom: 1.5rem;
                     box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-                }}                
+                }}
                 .hero-title {{
-                    font-size: 3rem;
-                    font-weight: 800;
-                    margin: 0.5rem 0 0.5rem 0;
-                    color: white;
+                    font-size:3rem;
+                    font-weight: 700;
+                    margin-bottom: 0.5rem;
+                    color: inherit; /* Adapts to Streamlit's dark/light theme */
                 }}
                 .hero-subtitle {{
                     font-size: 1rem;
@@ -5801,6 +5398,31 @@ with col_map1:
                         ),
                     )
 
+                    octi_extra_args = ""
+                    if schematic:
+                        with st.container(border=True):
+                            st.markdown("**Advanced: octi tuning flags**")
+                            st.caption(
+                                "octi's default grid/cell size can be too coarse "
+                                "for long, sparse routes, causing the zig-zag "
+                                "distortion. Run the help output below to see "
+                                "your build's real flag names (e.g. for cell "
+                                "size or base grid type), then paste the flag "
+                                "you want into the box."
+                            )
+                            if st.button("Show `octi -h` output", key="octi_help_btn"):
+                                try:
+                                    st.code(get_octi_help())
+                                except Exception as help_error:
+                                    st.error(f"Couldn't fetch octi help: {help_error}")
+
+                            octi_extra_args = st.text_input(
+                                "Extra flags to pass to octi",
+                                value="",
+                                key="octi_extra_args",
+                                placeholder="e.g. -b octilinear <cell-size flag> <value>",
+                            )
+
                     lw_col, ls_col = st.columns(2)
                     with lw_col:
                         loom_line_width = st.slider(
@@ -5834,19 +5456,19 @@ with col_map1:
                         )
                         loom_label_pad = st.slider(
                             "Label padding (px)",
-                            min_value=0, max_value=300, value=100, step=25,
+                            min_value=0, max_value=400, value=150, step=25,
                             key="loom_label_pad",
                         )
                         loom_label_font_scale = st.slider(
                             "Label font size x",
-                            min_value=0.75, max_value=3.0, value=2.0, step=0.05,
+                            min_value=0.75, max_value=3.0, value=1.5, step=0.05,
                             key="loom_label_font_scale",
                             help="Multiplies the font size in LOOM station labels.",
                         )
                     else:
-                        loom_label_pad = st.session_state.get("loom_label_pad", 100)
+                        loom_label_pad = st.session_state.get("loom_label_pad", 150)
                         loom_label_font_scale = st.session_state.get(
-                            "loom_label_font_scale", 1.25
+                            "loom_label_font_scale", 1.5
                         )
 
                     if schematic and selected_landmarks:
@@ -5864,6 +5486,7 @@ with col_map1:
                             svg = generate_loom_svg(
                                 tuple(selected_routes),
                                 schematic=schematic,
+                                octi_extra_args=octi_extra_args,
                                 line_width=loom_line_width,
                                 line_spacing=loom_line_spacing,
                                 label_pad=loom_label_pad,
