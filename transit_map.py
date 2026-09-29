@@ -4230,8 +4230,6 @@ def display_loom_svg(
     route_agency_map=None,
 ):
 
-    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
-
     # ---- build the export (composite) SVG -----------------------------
     composite_svg = build_composite_svg(
         svg,
@@ -4254,13 +4252,16 @@ def display_loom_svg(
         export_svg = composite_svg
     export_b64 = base64.b64encode(export_svg.encode("utf-8")).decode("ascii")
 
-    # Pull the composite's own declared size so the on-screen viewer can
-    # size itself to the map's real aspect ratio (see loomFitContainer
-    # below) instead of guessing from a rendered element.
-    _cw_match = re.search(r'width="([\d.]+)"', composite_svg)
-    _ch_match = re.search(r'height="([\d.]+)"', composite_svg)
-    composite_w = float(_cw_match.group(1)) if _cw_match else 1600.0
-    composite_h = float(_ch_match.group(1)) if _ch_match else 1200.0
+    # On-screen viewer sizing/zoom is based on the BARE map's own declared
+    # size, not the composite's -- title and legend are rendered as fixed
+    # HTML overlays outside the zoom/pan transform (see #loom-img below),
+    # so only the map itself should drive #loom-scroll's aspect ratio.
+    # The composite (title + map + legend baked into one SVG) is still
+    # used for the SVG/PNG downloads further down, untouched by this.
+    _mw_match = re.search(r'width="([\d.]+)"', svg)
+    _mh_match = re.search(r'height="([\d.]+)"', svg)
+    map_w = float(_mw_match.group(1)) if _mw_match else 1600.0
+    map_h = float(_mh_match.group(1)) if _mh_match else 1200.0
 
     legend_groups = {}
     for route_id in selected_routes:
@@ -4346,6 +4347,7 @@ def display_loom_svg(
       </style>
       <div id="loom-toolbar" style="display:flex; gap:6px; align-items:center;
            flex-wrap:wrap; padding:6px 10px; background:#f3f4f6; border-bottom:1px solid #ddd;">
+        <span style="font-size:13px; color:#555; margin-right:auto;">Transit Map of Kathmandu Valley</span>
         <button onclick="loomZoom(1.25)"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
                        border:1px solid #ccc; background:#fff;">➕ Zoom In</button>
@@ -4365,7 +4367,7 @@ def display_loom_svg(
                        border:1px solid #ccc; background:#fff;">⬇ PNG</button>
         <button onclick="loomFullscreen()"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
-                       border:1px solid #ccc; background:#fff; margin-left:auto;">
+                       border:1px solid #ccc; background:#fff;">
                 ⛶ Full Screen</button>
       </div>
      <div id="loom-scroll" style="position:relative; overflow:auto; width:100%; height:760px;
@@ -4374,27 +4376,60 @@ def display_loom_svg(
              style="display:block; width:100%; max-width:100%; margin:0 auto;
                     transform-origin:0 0; transition:transform 0.15s ease;
                     cursor:grab; user-select:none; touch-action:none;">
-          {composite_svg}
+          {svg}
+        </div>
+        <div id="loom-legend" style="position:absolute; left:18px; bottom:14px; z-index:5;
+             background:rgba(255,255,255,0.97); border:1px solid #d0d0d0;
+             padding:10px 14px; color:#222; font:12px Arial,sans-serif;
+             line-height:1.2; box-shadow:0 1px 4px rgba(0,0,0,.12);
+             display:flex; gap:18px; align-items:flex-start; box-sizing:border-box;
+             max-width:min(94%, 780px);">
+          <div style="min-width:120px;">
+            <div style="font-weight:700; font-size:14px; margin:0 0 6px; padding:0;
+                        color:#111; line-height:1.2;">Routes</div>
+            {legend_items}
+          </div>
+          <div style="min-width:130px; border-left:1px solid #ddd; padding-left:14px;">
+            <div style="font-weight:700; font-size:14px; margin:0 0 6px; padding:0;
+                        color:#111; line-height:1.2;">Symbols</div>
+            {symbol_items}
+          </div>
         </div>
       </div>
     </div>
     <script>
-      // Base64 of the raw LOOM transit map SVG — exports are just the map,
-      // with no extra title or legend baked in.
+      // The legend is a fixed HTML overlay sitting on top of #loom-img (not
+      // inside it), so it never scales/pans with the map. It sits above the
+      // map in stacking order, so a wheel/drag starting on it should not
+      // also zoom or pan the map underneath -- same pattern as the Transit
+      // Map's #transit-legend.
+      (function() {{
+        const legend = document.getElementById('loom-legend');
+        if (legend) {{
+          legend.addEventListener('wheel', function(e) {{ e.stopPropagation(); }}, {{ passive: false }});
+          legend.addEventListener('mousedown', function(e) {{ e.stopPropagation(); }});
+          legend.addEventListener('pointerdown', function(e) {{ e.stopPropagation(); }});
+          legend.addEventListener('touchstart', function(e) {{ e.stopPropagation(); }}, {{ passive: true }});
+        }}
+      }})();
+
+      // Downloads still use the composite (title + map + legend baked into
+      // one flat SVG) so the exported file looks complete on its own --
+      // only the interactive on-screen viewer keeps them separate.
       const loomCompositeSvgDataUrl = "data:image/svg+xml;base64,{composite_b64}";
       const loomExportSvgDataUrl = "data:image/svg+xml;base64,{export_b64}";
 
-      // The composite's own aspect ratio (map + title + legend), used
-      // below to size the viewer so the whole map is visible on load
-      // instead of forcing a scroll to see the bottom of it.
-      const LOOM_COMPOSITE_W = {composite_w};
-      const LOOM_COMPOSITE_H = {composite_h};
+      // The BARE map's own aspect ratio (title/legend excluded -- they're
+      // fixed overlays now), used to size the viewer so the whole map is
+      // visible on load instead of forcing a scroll to see the bottom of it.
+      const LOOM_MAP_W = {map_w};
+      const LOOM_MAP_H = {map_h};
 
-      // Grow (or shrink) #loom-scroll so the composite renders at its
-      // natural, unzoomed height within the current width -- capped so
-      // it never takes over the whole browser window. Only applies at
-      // scale 1 with no pan; once the user zooms in, panning/scrolling
-      // inside the fixed-height viewport takes over as normal.
+      // Grow (or shrink) #loom-scroll so the map renders at its natural,
+      // unzoomed height within the current width -- capped so it never
+      // takes over the whole browser window. Only applies at scale 1 with
+      // no pan; once the user zooms in, panning/scrolling inside the
+      // fixed-height viewport takes over as normal.
       function loomFitContainer() {{
         const scrollEl = document.getElementById('loom-scroll');
         const img = document.getElementById('loom-img');
@@ -4405,7 +4440,7 @@ def display_loom_svg(
         // min-width), so measure the image's real rendered width rather
         // than assuming it matches the scroll container.
         const imgW = img.getBoundingClientRect().width || (scrollEl.clientWidth - 56);
-        const naturalH = imgW * (LOOM_COMPOSITE_H / LOOM_COMPOSITE_W);
+        const naturalH = imgW * (LOOM_MAP_H / LOOM_MAP_W);
         const capH = window.innerHeight * (isFs ? 0.92 : 0.85);
         scrollEl.style.height = Math.max(360, Math.min(naturalH + 94, capH)) + 'px';
       }}
