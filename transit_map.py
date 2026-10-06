@@ -7163,61 +7163,66 @@ def img_to_base64(path):
         return ""
 img = img_to_base64("image.png")
 
-# ================= TOP CONTAINER (HERO BANNER) =================
-with st.container(border=True):
-    if img:
-        st.markdown(
-            f"""
-            <style>
-                .hero-container {{
-                    width: 100%;
-                    padding: 0;
-                    margin: 0;
-                    text-align: center;
-                }}
-                .hero-img {{
-                    display: block;
-                    width: 100%;
-                    height: 315px;
-                    max-width: none;
-                    max-height: none;
-                    object-fit: cover;
-                    object-position: center;
-                    border-radius: 14px;
-                    margin: 0 0 1.4rem 0;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-                }}
-                .hero-title {{
-                    font-size: 3rem;
-                    font-weight: 800;
-                    margin: 0.5rem 0 0.5rem 0;
-                    color: white;
-                }}
-                .hero-subtitle {{
-                    font-size: 1rem;
-                    letter-spacing: 2px;
-                    opacity: 0.8;
-                    font-weight: 500;
-                }}
-            </style>
+# Flags: set to True to bring back the banner / the charts and detail sections.
+SHOW_BANNER = False
+SHOW_EXTRA_SECTIONS = False
 
-            <div class="hero-container">
-                <img src="data:image/png;base64,{img}" class="hero-img">
-                <div class="hero-title">KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown(
-            """
-            <div style="text-align: center; padding: 1rem 0;">
-                <h1>KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</h1>
-                <p style="letter-spacing: 2px; opacity: 0.8;"> • KTM VALLEY  • GTFS FEED 2026</p>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+if SHOW_BANNER:
+    # ================= TOP CONTAINER (HERO BANNER) =================
+    with st.container(border=True):
+        if img:
+            st.markdown(
+                f"""
+                <style>
+                    .hero-container {{
+                        width: 100%;
+                        padding: 0;
+                        margin: 0;
+                        text-align: center;
+                    }}
+                    .hero-img {{
+                        display: block;
+                        width: 100%;
+                        height: 315px;
+                        max-width: none;
+                        max-height: none;
+                        object-fit: cover;
+                        object-position: center;
+                        border-radius: 14px;
+                        margin: 0 0 1.4rem 0;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+                    }}
+                    .hero-title {{
+                        font-size: 3rem;
+                        font-weight: 800;
+                        margin: 0.5rem 0 0.5rem 0;
+                        color: white;
+                    }}
+                    .hero-subtitle {{
+                        font-size: 1rem;
+                        letter-spacing: 2px;
+                        opacity: 0.8;
+                        font-weight: 500;
+                    }}
+                </style>
+
+                <div class="hero-container">
+                    <img src="data:image/png;base64,{img}" class="hero-img">
+                    <div class="hero-title">KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                """
+                <div style="text-align: center; padding: 1rem 0;">
+                    <h1>KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</h1>
+                    <p style="letter-spacing: 2px; opacity: 0.8;"> • KTM VALLEY  • GTFS FEED 2026</p>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
 # ================= LOAD DATA =================
 df_cong = fetch_congestion()
@@ -7320,7 +7325,10 @@ with st.container(border=True):
         </div>
         """, unsafe_allow_html=True)
 
-col_filter, col_map1, col_map2 = st.columns([1.5, 3, 1.5])
+if SHOW_EXTRA_SECTIONS:
+    col_filter, col_map1, col_map2 = st.columns([1.5, 3, 1.5])
+else:
+    col_filter, col_map1 = st.columns([1.2, 3.8])
 
 # =========================================================
 # ROUTE COLORS (GLOBAL COLOR MAP) — single source of truth,
@@ -7394,7 +7402,8 @@ with col_filter:
 # MAP CONTAINER
 # =========================================================
 with col_map1:
-        with st.expander("Route Map", expanded=True):
+        with st.container(border=True):
+            st.markdown("###### Route Map")
 
             # ================= CHECK ROUTES =================
             if not selected_routes:
@@ -7812,6 +7821,10 @@ with col_map1:
                         st.error("LOOM map generation failed.")
                         st.exception(error)
 
+
+# Everything below (charts, route details, congestion) stays hidden
+if not SHOW_EXTRA_SECTIONS:
+    st.stop()
 
 # =========================================================
 # CHART CONTAINER
