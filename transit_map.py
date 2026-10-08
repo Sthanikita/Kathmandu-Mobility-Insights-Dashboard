@@ -23,11 +23,6 @@ import hashlib
 import platform
 import xml.etree.ElementTree as ET
 
-# LOOM SVG post-processing re-serializes the document with ElementTree.
-# Without this registration ET writes tags as <ns0:svg>, <ns0:text>, ...
-# (an unbound, arbitrary prefix), which (a) breaks rendering in browsers
-# and (b) makes tag searches like rfind("</svg>") fail -- silently dropping
-# landmark injection and any other string-level SVG surgery.
 ET.register_namespace("", "http://www.w3.org/2000/svg")
 ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
 
@@ -500,23 +495,47 @@ def is_major_transit_stop(stop_name):
 # VECTOR LANDMARKS
 # =========================================================
 LANDMARKS = {
-    "Pashupati Temple": {"lat":27.710637, "lon": 85.349527, "svg": "new_icon/pashupati.svg", "scale": 0.55},
-        "Dharahara": {"lat": 27.700846100092736, "lon":  85.31200513924873, "svg": "new_icon/Dharahara.svg"},
-        "Boudhanath Stupa": {"lat": 27.7215, "lon": 85.3620, "svg": "new_icon/boudhastupa.svg", "scale": 0.55},
-        "Swayambhunath": {"lat": 27.7149, "lon": 85.2906, "svg": "new_icon/Swayambhu.svg"},
-        "Tribhuvan International Airport": {"lat": 27.698428, "lon":85.362892, "svg": "new_icon/vector.svg"},
-        "UN Park": {"lat":27.6854334117676, "lon":85.3257565314652, "svg": "new_icon/UN PARK.svg"},
-        "Kathmandu Fun Park": {"lat": 27.701374732249555, "lon": 85.32040843415382,"svg": "new_icon/KATHMANDU FUN PARK.svg"},
-        "ZOO": {"lat": 27.672943662412717, "lon":  85.31179605885961,"svg": "new_icon/ZOO.svg"},
-        "Narayanhiti Palace Museum": {"lat": 27.71491540425667, "lon": 85.31810084081023, "svg": "new_icon/Narayanhiti Durbar Museum.svg"},
-        "Bir Hospital": {"lat": 27.707979621014402, "lon": 85.31301004680573, "svg": "new_icon/Bir Hospital.svg"},
-        "Basantapur  Durbar Square": {"lat": 27.70437922513459, "lon": 85.30642066943844, "svg": "new_icon/BDS 1.svg"},
-        "Patan Durbar Square": {"lat": 27.672660069722838, "lon":  85.32555712962338, "svg": "new_icon/PDS.svg"},
-        "Mhepi":{"lat": 27.720773, "lon": 85.308846, "svg": "new_icon/Mehpi.svg"},
-        "Raniban Samudayik Ban":{"lat": 27.731528, "lon":  85.321387, "svg": "new_icon/Raniban Samudayik Ban.svg"},
-        "Macchapokhari Bus Stop": {"lat": 27.727401, "lon": 85.312875, "svg": "new_icon/Macchapokhari bus park.svg"},
+    "Pashupati Temple": {"lat":27.710637, "lon": 85.349527, "svg": "new_icon/pashupati.svg", "scale": 0.95, "anchor": "Gaushala", "anchor2": "Pingalsthan Gaushala", "t": 0.5, "side": 1, "offset": 1.2},
+        "Dharahara": {"lat": 27.701755, "lon": 85.310071, "svg": "new_icon/Dharahara.svg", "anchor": "Shahid Gate Bus Stop", "side": -1, "offset": 0.85},
+        "Boudhanath Stupa": {"lat": 27.722685, "lon":  85.359812, "svg": "new_icon/boudhastupa.svg", "scale": 0.55, "anchor": "Chabahil Bus Station2", "anchor2": "Chabahil Bus Stop1", "t": 0.58, "side": 1, "offset": 0.8},
+        "Swayambhunath": {"lat":27.714522, "lon": 85.288690, "svg": "new_icon/Swayambhu.svg", "anchor": "Thulo Bharyang1", "anchor2": "Swayambhu Bus Stop1", "t": 0.5, "side": 1, "offset": 0.75},
+        "Tribhuvan International Airport": {"lat": 27.696670, "lon": 85.360190, "svg": "new_icon/Airport.svg","scale": 0., "anchor": "Sinamangal Chowk", "anchor2": "Koteshwor Bus Stop3", "t": 0.65, "side": 1, "offset": 1.2},
+        "UN Park": {"lat":27.6854334117676, "lon":85.3257565314652, "svg": "new_icon/UN PARK.svg", "anchor": "Kupondole Bus Stop1", "anchor2": "Krishna Galli Bus Stop2", "t": 0.6, "side": -1, "offset": 0.75},
+        "Kathmandu Fun Park": {"lat": 27.700810, "lon": 85.328657, "svg": "new_icon/KATHMANDU FUN PARK.svg", "anchor": "Tundikhel Bus Stop", "side": 1, "offset": 1.5},
+        "ZOO": {"lat": 27.674287, "lon": 85.309118, "svg": "new_icon/ZOO.svg", "anchor": "Satdobato_Lagankhel Road", "side": -1, "offset": 1.2},
+        "Narayanhiti Palace Museum": {"lat": 27.71491540425667, "lon": 85.31810084081023, "svg": "new_icon/Narayanhiti Durbar Museum.svg","scale": 0.6, "anchor": "Narayanhiti Marg Bus Stop", "anchor2": "Ramayan Barahi", "t": 0, "side": -1, "offset": 0.95},
+        "Bir Hospital": {"lat": 27.706729, "lon": 85.310652, "svg": "new_icon/Bir Hospital.svg", "scale": 0.6, "anchor": ["Ratna Park Bus Station1", "Bir Hospital Bus Stop"], "anchor2": "Nac Bus Stop", "t": 0.5, "side": -1, "offset": 1.5},
+        "Basantapur  Durbar Square": {"lat": 27.705431, "lon": 85.304379, "svg": "new_icon/BDS 1.svg", "anchor": "Ratna Park Micro Bus Stop", "side": -1, "offset": 1.8},
+        "Patan Durbar Square": {"lat": 27.672660069722838, "lon":  85.32555712962338, "svg": "new_icon/PDS.svg", "anchor": "Ekantakuna1", "side": 1, "offset": 1.0},
+        "Mhepi":{"lat": 27.722499, "lon": 85.303104, "svg": "new_icon/Mehpi.svg", "anchor": "Yerahiti", "anchor2": "Thulo Bharyang1", "t": 0.5, "side": 1, "offset": 0.6},
+        "Macchapokhari Bus Park": {"lat": 27.730661, "lon": 85.310039, "svg": "new_icon/Macchapokhari bus park.svg", "anchor": "Machha Pokhari", "side": -1, "offset": 1.0},
+        "Rani Pokhari":{"lat": 27.70780675, "lon": 85.3153348, "svg": "new_icon/Rani_Pokhari.svg", "scale": 0.448, "anchor": "Lainchaur Bus Station", "anchor2": ["Ratna Park Bus Station1", "Bir Hospital Bus Stop"], "t": 0.68, "side": -1, "offset": 0.75},
+        "Chauni": {"lat": 27.707246, "lon": 85.293175, "svg": "new_icon/chaune.svg","anchor": "Swayambhu Bus Stop1", "anchor2": "Sitapaila Stop", "t": 0.5, "side": 1, "offset": 1.0},
+        "Gopi Krishna Hall": {"lat": 27.724308, "lon": 85.351880, "svg": "new_icon/cinema_hall.svg", "scale": 0.55, "anchor": "Sukedhara2", "anchor2": "Gopi Krishna Bus Stop", "t": 0.24, "side": 1, "offset": 1.2},
+        "Bhandarkhal": {"lat": 27.708326, "lon": 85.337344, "svg": "new_icon/Bhandarkhal.svg", "scale": 0.95, "anchor": "Gaushala", "anchor2": "Jaya Bageshwori", "t": 0.24, "side": -1, "offset": 1.2},
+        "Kamal Pokhari": {"lat": 27.709880, "lon": 85.329843, "svg": "new_icon/Kamal Pokhari.svg", "scale": 0.55}
 }
 DEFAULT_LANDMARKS = tuple(LANDMARKS.keys())
+
+# Rani Pokhari shoreline from OpenStreetMap way 21565774. Keep the real
+# geographic outline so the pond fits its surrounding roads at map scale.
+RANI_POKHARI_RING = (
+    (85.3144768, 27.7072647),
+    (85.3161147, 27.7072244),
+    (85.3161928, 27.7083511),
+    (85.3145111, 27.7083891),
+    (85.3145087, 27.7078399),
+    (85.3152384, 27.7078270),
+    (85.3152395, 27.7078870),
+    (85.3154215, 27.7078825),
+    (85.3154164, 27.7077190),
+    (85.3152344, 27.7077234),
+    (85.3152376, 27.7077940),
+    (85.3145080, 27.7078067),
+    (85.3144768, 27.7072647),
+)
+RANI_POKHARI_FILL = "rgba(75,193,235,0.4)"
+RANI_POKHARI_STROKE = "rgba(127,169,184,0.55)"
 
 
 def get_landmark_records(selected_landmarks):
@@ -538,19 +557,8 @@ def get_landmark_records(selected_landmarks):
 # =========================================================
 # MAP DATA LAYERS: RIVERS + ROADS (your own GeoJSON files)
 # =========================================================
-# Put your edited files in a `data` folder NEXT TO THIS SCRIPT:
-#     data/kathmandu_river.geojson   -> river layer
-#     data/trunk.geojson             -> road layer
-# (a `data` folder in the current working directory also works).
-#
-# If a file is found it is ALWAYS used. OpenStreetMap (Overpass) is only
-# used when NO local file exists AND the *_ALLOW_OSM_FALLBACK flag is True.
-# A file that exists but can't be read raises a visible error instead of
-# silently showing random OSM data.
-#
-# Edited files are picked up automatically (cache is keyed on the file's
-# modified time), no need to clear the Streamlit cache.
-RIVER_COLOR = "#8ec5ec"
+
+RIVER_COLOR = "#a8d4f2"
 RIVER_LABEL_COLOR = "#2f6fa3"
 RIVER_BBOX = (27.55, 85.15, 27.85, 85.60)  # south, west, north, east
 RIVER_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
@@ -558,22 +566,17 @@ RIVER_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 # -------------------------------------------------------------------
 # CARTOGRAPHIC ROAD STYLE FOR THE TRANSIT MAP
 # -------------------------------------------------------------------
-# Each road is drawn twice: a wider grey casing first, then a lighter
-# inner surface.  Transit routes are drawn later and therefore sit
-# visually in the middle of the road.
 ROAD_CASING_COLOR = "#a8a8a8"
 ROAD_SURFACE_COLOR = "#f4f4f4"   # light surface so the road edges read clearly
 
-# Per-class colours so trunk and primary roads are easy to tell apart.
-# ("secondary" is the bucket used for TRUNK roads in this dataset -- see
-# _road_hierarchy.)  Any class not listed falls back to the colours above.
+
 ROAD_CASING_COLORS = {
-    "primary":   "#a8a8a8",   # primary: neutral grey outline
-    "secondary": "#c9a227",   # trunk:   golden outline
+    "primary":   "#d1cdcd",   # primary: neutral grey outline
+    "secondary": "#eecb58",   # trunk:   golden outline
 }
 ROAD_SURFACE_COLORS = {
     "primary":   "#f4f4f4",   # primary: light grey/white fill
-    "secondary": "#fff1b8",   # trunk:   pale yellow fill
+    "secondary": "#fefae8",   # trunk:   pale yellow fill
 }
 
 # Screen-pixel widths. Much thinner than before so neighbouring roads no
@@ -591,12 +594,7 @@ ROAD_SURFACE_WIDTH = {
     "other": 2.5,
 }
 
-# Draw minor roads first, major roads last, so a motorway/trunk surface
-# cleanly cuts across the casing of a minor road at junctions.
-# ("secondary" = trunk here, drawn last so trunk roads sit on top.)
 ROAD_DRAW_ORDER = {"other": 0, "tertiary": 1, "primary": 2, "secondary": 3}
-# Kept for backwards compatibility with any other code that references
-# ROAD_COLOR / ROAD_HIERARCHY_WIDTH.
 ROAD_COLOR = ROAD_SURFACE_COLOR
 ROAD_HIERARCHY_WIDTH = ROAD_SURFACE_WIDTH
 ROAD_BBOX = (27.55, 85.15, 27.85, 85.60)  # south, west, north, east
@@ -619,8 +617,8 @@ def _data_candidates(*names):
 
 
 RIVER_DATA_FILES = _data_candidates(
-    "kathmandu_river.geojson", "kathmandu_rivers.geojson",
-    "kathmandu_river.json", "kathmandu_rivers.json",
+    "kathmandu_rivers.geojson",
+     "kathmandu_rivers.json",
 )
 ROAD_DATA_FILES = _data_candidates(
      "kathmandu_road.geojson", "kathmandu_road.gpkg",
@@ -746,7 +744,8 @@ def _road_hierarchy(road_class, road_name=""):
 def _road_props(props):
     props = props or {}
     name = (props.get("road_name") or props.get("link_name") or props.get("name:en")
-            or props.get("name") or props.get("NAME") or props.get("Name"))
+            or props.get("name_en") or props.get("name") or props.get("NAME")
+            or props.get("Name"))
     road_class = (props.get("road_class") or props.get("highway")
                   or props.get("fclass") or props.get("type") or props.get("TYPE"))
     return name, _road_hierarchy(road_class, props.get("road_name") or name or "")
@@ -1104,7 +1103,7 @@ def add_rivers_to_transit_figure(fig, lon_range, lat_range):
             x=[p[0] for p in pts],
             y=[p[1] for p in pts],
             mode="lines",
-            line=dict(color=RIVER_COLOR, width=2.5 if kind == "river" else 1.5),
+            line=dict(color=RIVER_COLOR, width=8 if kind == "river" else 4.5),
             connectgaps=False,
             hoverinfo="text",
             hovertext=name,
@@ -1230,6 +1229,75 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
             showlegend=False,
             uid=f"road-surface-{hierarchy}-{name}",
         ))
+
+    # ------------------------------------------------------------
+    # LAYER 3: ROAD NAME LABELS (one label per unique road name)
+    # ------------------------------------------------------------
+    # The GeoJSON often contains many separate features sharing one road
+    # name (that's why e.g. "Tripureshwor" used to appear several times),
+    # so candidates are deduped by name and only the LONGEST run of each
+    # name is kept, labelled once at its midpoint.
+    #
+    # Labels are also ranked by run length into zoom levels (0 = most
+    # important). Only level-0 labels are visible at the initial view;
+    # the injected JS in display_transit_map reveals higher levels as the
+    # user zooms in.
+    base_span = max(lon_hi - lon_lo, 1e-9)
+    best_by_name = {}
+    for (name, hierarchy), pts in grouped.items():
+        key = str(name).strip().casefold()
+        if not key or key == "road":
+            continue  # unnamed roads: don't label the placeholder
+        runs, run = [], []
+        for p in pts:
+            if p[0] is None:
+                if len(run) >= 2:
+                    runs.append(run)
+                run = []
+            else:
+                run.append(p)
+        if len(run) >= 2:
+            runs.append(run)
+        for r in runs:
+            length = sum(
+                math.hypot(b[0] - a[0], b[1] - a[1])
+                for a, b in zip(r, r[1:])
+            )
+            if key not in best_by_name or length > best_by_name[key][0]:
+                mid = r[len(r) // 2]
+                best_by_name[key] = (length, mid[0], mid[1], str(name))
+
+    level_traces = {}
+    for key, (length, x, y, label) in best_by_name.items():
+        if length >= 0.20 * base_span:
+            level = 0
+        elif length >= 0.06 * base_span:
+            level = 1
+        elif length >= 0.02 * base_span:
+            level = 2
+        else:
+            level = 3
+        level_traces.setdefault(level, []).append((x, y, label))
+
+    for level in sorted(level_traces):
+        pts = level_traces[level]
+        fig.add_trace(go.Scatter(
+            x=[p[0] for p in pts],
+            y=[p[1] for p in pts],
+            mode="text",
+            text=[p[2] for p in pts],
+            textfont=dict(size=9, color="#6b7280", family="Arial, sans-serif"),
+            textposition="middle center",
+            hoverinfo="skip",
+            showlegend=False,
+            uid=f"road-labels-l{level}",
+            visible=(level == 0),
+        ))
+
+    if level_traces:
+        # Base x-span, used by the JS zoom filter in display_transit_map.
+        fig.update_layout(meta=dict(
+            fig.layout.meta or {}, roadLabelSpan=base_span))
 
     added = len(fig.data) - n_before
     if added:
@@ -1502,11 +1570,10 @@ def build_river_svg_markup(svg, route_stops, rivers, line_width=40):
     else:
         box = (vx, vy, vx + vw, vy + vh)
 
-    # Keep rivers thin so they read as background geography, not as thick
-    # bands competing with the route lines (the old line_width * 1.5 made
-    # them ~60 px wide at the default line width).
-    river_w = max(float(line_width) * 0.25, 3.0)
-    stream_w = max(float(line_width) * 0.15, 2.0)
+    # Wider strokes so rivers read as real water bodies instead of thin
+    # background lines (streams stay proportionally thinner).
+    river_w = max(float(line_width) * 0.25, 4.0)
+    stream_w = max(float(line_width) * 0.12, 2.0)
 
     body, longest = [], {}
     for name, kind, pts in rivers:
@@ -1810,7 +1877,20 @@ def _normalize_stop_name_for_match(name):
     (e.g. the label "Kalanki Bus Stop1" for the GTFS stop "Kalanki Bus
     Stop"). Mirrors the normalization is_major_transit_stop() already uses
     elsewhere in the app for the same reason."""
-    return re.sub(r"[\s_-]*\d+\s*$", "", str(name or "").strip().casefold())
+    s = _collapse_repeated_text(str(name or "").strip().casefold())
+    s = re.sub(r"[\s_-]*\d+\s*$", "", s)
+    return _collapse_repeated_text(s)
+
+
+def _collapse_repeated_text(s):
+    """LOOM sometimes renders a label's text twice back to back
+    ("Gopi Krishna Bus StopGopi Krishna Bus Stop"). Collapse that to one copy."""
+    n = len(s)
+    if n >= 6 and n % 2 == 0 and s[:n // 2] == s[n // 2:]:
+        return s[:n // 2]
+    if n >= 7 and n % 2 == 1 and s[n // 2] in " _-" and s[:n // 2] == s[n // 2 + 1:]:
+        return s[:n // 2]
+    return s
 
 
 def _extract_svg_polyline_segments(svg):
@@ -2094,6 +2174,129 @@ def _clamp_shift(base_x, base_y, x, y, max_shift):
     return base_x + dx * scale, base_y + dy * scale
 
 
+@st.cache_data
+def _network_stops_for_anchor():
+    """Every stop in the whole network (independent of selected routes), so a
+    landmark's anchor stop never changes when routes are added/removed."""
+    try:
+        return pd.read_sql(
+            "SELECT stop_name, stop_lat, stop_lon FROM stops", get_engine()
+        ).dropna().to_dict("records")
+    except Exception:
+        return []
+
+
+def _fixed_anchor_stop_name(record):
+    """Anchor stop for a landmark: explicit record["anchor"] if given, else the
+    nearest stop in the FULL network (cached, route-selection independent)."""
+    explicit = str(record.get("anchor") or "").strip()
+    if explicit:
+        return explicit
+    best = None
+    coslat = math.cos(math.radians(record["lat"]))
+    for s in _network_stops_for_anchor():
+        try:
+            dx = (float(s["stop_lon"]) - record["lon"]) * coslat
+            dy = float(s["stop_lat"]) - record["lat"]
+        except (TypeError, ValueError):
+            continue
+        d2 = dx * dx + dy * dy
+        if best is None or d2 < best[0]:
+            best = (d2, str(s["stop_name"]).strip())
+    return best[1] if best else ""
+
+
+def _match_anchor_label(anchor_norm, svg_labels, anchor_raw=None):
+    """Find the drawn station label for an anchor name. Exact match first (after
+    case/trailing-number normalisation), then a tolerant match so "Gaushala"
+    still finds "Gaushala Chowk" / "Gaushala Bus Stop" (shortest label wins)."""
+    if anchor_raw:  # digit-aware exact match first: "Sukedhara1" vs "Sukedhara2"
+        for l in svg_labels:
+            if _collapse_repeated_text(str(l.get("text", "")).strip().casefold()) == anchor_raw:
+                return l
+    labels = [(_normalize_stop_name_for_match(l.get("text", "")), l) for l in svg_labels]
+    for key, l in labels:
+        if key == anchor_norm:
+            return l
+    loose = [(key, l) for key, l in labels
+             if key and (key.startswith(anchor_norm + " ")
+                         or anchor_norm.startswith(key + " ")
+                         or (" " + anchor_norm + " ") in (" " + key + " "))]
+    if loose:
+        return min(loose, key=lambda kl: len(kl[0]))[1]
+    prefix = [(key, l) for key, l in labels if key and key.startswith(anchor_norm)]
+    if prefix:
+        return min(prefix, key=lambda kl: len(kl[0]))[1]
+    return None
+
+
+def _first_anchor_label(names, svg_labels):
+    """names: one stop name or a list of alternatives (first one drawn wins)."""
+    if isinstance(names, str):
+        names = [names]
+    for nm in (names or []):
+        norm = _normalize_stop_name_for_match(nm)
+        if not norm:
+            continue
+        raw = _collapse_repeated_text(str(nm).strip().casefold())
+        label = _match_anchor_label(norm, svg_labels, raw)
+        if label is not None:
+            return label
+    return None
+
+
+def _pinned_landmark_position(record, svg_labels, markers, segments, eff_size):
+    """Fixed spot: the anchor stop's drawn marker, offset to a fixed side of the
+    line through it. Independent of other routes, labels and other icons.
+    Returns ((x, y), (marker_x, marker_y)) or None if the anchor isn't drawn."""
+    names = record.get("anchor") or _fixed_anchor_stop_name(record)
+    label = _first_anchor_label(names, svg_labels)
+    if label is None:
+        return None
+    try:
+        bx, by = _snap_label_to_marker(label, markers or [])
+    except (TypeError, ValueError, KeyError):
+        return None
+
+    # "Between two stops": put the icon on the stretch of line between the
+    # anchor stop and "anchor2", offset sideways from that stretch.
+    if record.get("anchor2"):
+        label2 = _first_anchor_label(record.get("anchor2"), svg_labels)
+        if label2 is None:
+            return None
+        try:
+            b2x, b2y = _snap_label_to_marker(label2, markers or [])
+        except (TypeError, ValueError, KeyError):
+            return None
+        t_frac = min(max(float(record.get("t", 0.5)), 0.0), 1.0)
+        mx, my = bx + (b2x - bx) * t_frac, by + (b2y - by) * t_frac
+        ddx, ddy = b2x - bx, b2y - by
+        ln = math.hypot(ddx, ddy) or 1.0
+        nx, ny = -ddy / ln, ddx / ln
+        if nx < -1e-6 or (abs(nx) <= 1e-6 and ny < 0):
+            nx, ny = -nx, -ny           # canonical, route-independent sign
+        side = 1 if float(record.get("side", 1) or 1) >= 0 else -1
+        off = eff_size * float(record.get("offset", 1.0))
+        return (mx + side * nx * off, my + side * ny * off), (mx, my)
+
+    # Only lines that actually touch this marker decide the direction.
+    touching = []
+    for (ax, ay, cx, cy) in segments:
+        d, nrm = _point_segment_dist_and_normal(bx, by, ax, ay, cx, cy)
+        if d < 2.0:
+            touching.append(nrm)
+    if touching:
+        nx, ny = touching[0]
+        # canonicalise so the sign never depends on route/segment order
+        if nx < -1e-6 or (abs(nx) <= 1e-6 and ny < 0):
+            nx, ny = -nx, -ny
+    else:
+        nx, ny = 0.0, -1.0
+    side = 1 if float(record.get("side", 1) or 1) >= 0 else -1
+    dist = eff_size * 1.0
+    return (bx + side * nx * dist, by + side * ny * dist), (bx, by)
+
+
 def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
                                icon_size=28, schematic=False):
     """Embed geographic vector landmarks into the LOOM SVG.
@@ -2114,8 +2317,19 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
     leader line back to its anchor point when it had to move.
     """
     records = get_landmark_records(selected_landmarks)
+    rani_pokhari = None
+    if not schematic:
+        rani_pokhari = next(
+            (record for record in records if record["name"] == "Rani Pokhari"),
+            None,
+        )
+        if rani_pokhari:
+            records = [
+                record for record in records
+                if record["name"] != "Rani Pokhari"
+            ]
     vb = _svg_viewbox(svg)
-    if not records or not selected_routes or vb is None:
+    if (not records and rani_pokhari is None) or not selected_routes or vb is None:
         return svg
 
     vx, vy, vw, vh = vb
@@ -2148,6 +2362,11 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
 
     def geo_to_svg(lon, lat):
         return (vx + ((lon-lon_min)/lon_span)*vw, vy + ((lat_max-lat)/lat_span)*vh)
+
+    rani_xy = (
+        [geo_to_svg(lon, lat) for lon, lat in RANI_POKHARI_RING]
+        if rani_pokhari else []
+    )
 
     # Obstacles an icon should not sit on: drawn lines, OTHER stops' markers
     # and station-name text. Label text is approximated by its base path.
@@ -2195,54 +2414,21 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
     placed_xy = []
     for record in records:
         if schematic:
-            # Octilinear (schematic) map only: anchor to the drawn stop and
-            # pick the clearest nearby spot (see _placement_cost).
-            res = _schematic_landmark_position(
-                record, route_stops, svg_labels, markers, k=5)
-            if res is None:
+            # PINNED placement: fixed anchor stop + fixed side, so selecting
+            # more routes never moves the icon relative to its stop/line.
+            pinned = _pinned_landmark_position(
+                record, svg_labels, markers, segments, eff_size)
+            if pinned is not None:
+                (x, y), (base_x, base_y) = pinned
+                placements.append((record, x, y, base_x, base_y, False))
+                placed_xy.append((x, y))
                 continue
-            (px, py), (base_x, base_y) = res
-            # Never let the estimate wander far from the nearest real stop.
-            # A bad prediction (poorly-conditioned octilinear layout) must
-            # collapse back onto the stop instead of landing in empty space.
-            # eff_size keeps the icon visually ATTACHED to its stop -- any
-            # further and it reads as belonging to a different place.
-            far = math.hypot(px - base_x, py - base_y)
-            max_far = eff_size * 1.0
-            if far > max_far:
-                px = base_x + (px - base_x) * max_far / far
-                py = base_y + (py - base_y) * max_far / far
-
-            # Candidate spots around the NEAREST STOP MARKER (base), not the
-            # least-squares estimate: anchoring to the drawn marker is what
-            # keeps the icon visually attached to the correct stop even when
-            # the octilinear fit is poorly conditioned. Both sides of the
-            # nearest line (so the icon sits BESIDE the line, at the same
-            # place along it) plus 8 compass directions.
-            cands = [(0.0, 0.0)]
-            nd, nn = None, (0.0, 1.0)
-            for (ax, ay, bx2, by2) in segments:
-                d, nrm = _point_segment_dist_and_normal(base_x, base_y, ax, ay, bx2, by2)
-                if nd is None or d < nd:
-                    nd, nn = d, nrm
-            for f in (0.7, 0.95, 1.25, 1.6):
-                cands.append((nn[0] * f * eff_size, nn[1] * f * eff_size))
-                cands.append((-nn[0] * f * eff_size, -nn[1] * f * eff_size))
-            for f in (0.7, 1.1, 1.5):
-                for ux, uy in directions:
-                    cands.append((ux * f * eff_size, uy * f * eff_size))
-            best = None
-            for ox, oy in cands:
-                cx_, cy_ = base_x + ox, base_y + oy
-                c = _placement_cost(cx_, cy_, math.hypot(cx_ - base_x, cy_ - base_y),
-                                    placed_xy, (base_x, base_y))
-                if best is None or c < best[0]:
-                    best = (c, cx_, cy_)
-            _, x, y = best
-            # Leader line only when the icon is noticeably away from the stop.
-            placements.append((record, x, y, base_x, base_y,
-                               math.hypot(x - base_x, y - base_y) > eff_size * 0.9))
-            placed_xy.append((x, y))
+            # No drawn anchor: SKIP this landmark entirely instead of
+            # guessing a spot from a nearest-stop estimate. If the anchor
+            # stop (or anchor2, when defined) isn't rendered on the map,
+            # the icon would land somewhere misleading, so it doesn't
+            # appear at all.
+            continue
         else:
             # Geographic (non-schematic) map: ORIGINAL behaviour, unchanged.
             base_x, base_y = geo_to_svg(record["lon"], record["lat"])
@@ -2260,17 +2446,38 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
     # every icon to within ~1.25 icon-widths of its OWN stop, so icons
     # stay at their respective stops while no longer overlapping.
     canvas_limit = max(vx + vw, vy + vh) * 2.0
-    _separate_landmark_icons(placements, eff_size, segments, canvas_limit)
+    if not schematic:  # schematic icons are pinned; separation would move them
+        _separate_landmark_icons(placements, eff_size, segments, canvas_limit)
 
-    if not placements:
+    if not placements and not rani_xy:
         return svg
 
     pad = max(icon_size * 2.0, min(vw, vh) * 0.035)
-    all_x = [vx, vx + vw] + [p[1] for p in placements]
-    all_y = [vy, vy + vh] + [p[2] for p in placements]
+    all_x = (
+        [vx, vx + vw]
+        + [p[1] for p in placements]
+        + [x for x, _ in rani_xy]
+    )
+    all_y = (
+        [vy, vy + vh]
+        + [p[2] for p in placements]
+        + [y for _, y in rani_xy]
+    )
     new_min_x, new_max_x = min(all_x) - pad, max(all_x) + pad
     new_min_y, new_max_y = min(all_y) - pad, max(all_y) + pad
 
+    rani_markup = ""
+    if rani_xy:
+        rani_path = "M " + " L ".join(
+            f"{x:.3f} {y:.3f}" for x, y in rani_xy
+        ) + " Z"
+        rani_markup = (
+            '\n<!-- Rani Pokhari shoreline: OpenStreetMap contributors -->\n'
+            f'<path d="{rani_path}" fill="{RANI_POKHARI_FILL}" '
+            f'stroke="{RANI_POKHARI_STROKE}" stroke-width="1" '
+            'stroke-linejoin="round" pointer-events="visiblePainted">'
+            '<title>Rani Pokhari - OpenStreetMap contributors</title></path>'
+        )
     parts = []
     for record, x, y, base_x, base_y, moved in placements:
         # Dotted leader line only on the GEOGRAPHIC map. On the octilinear
@@ -2307,7 +2514,7 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
                              f"{new_max_x-new_min_x:.3f} {new_max_y-new_min_y:.3f}" + m.group(2),
         updated, count=1, flags=re.IGNORECASE
     )
-    return updated
+    return insert_river_markup(updated, rani_markup)
 
 
 def _separate_landmark_icons(placements, icon_size, segments, max_push):
@@ -2320,12 +2527,8 @@ def _separate_landmark_icons(placements, icon_size, segments, max_push):
     already-placed neighbour, one pass at a time, while keeping the result
     clear of the transit lines.
     """
-    # Icons are drawn at roughly `icon_size` px and each carries a hover
-    # label, so centers need well over one icon-width of separation or the
-    # glyphs still visually overlap. 1.7x keeps even the widest custom SVG
-    # icons apart (hospital / fun park / durbar square anchor within ~1 km
-    # of each other in the real data, so the old 1.15x gap left them
-    # stacked on top of one another).
+
+   
     min_gap = icon_size * 1.7
     moved_any = False
     for i in range(len(placements)):
@@ -2354,10 +2557,7 @@ def _separate_landmark_icons(placements, icon_size, segments, max_push):
             moved_any = True
         placements[i] = (record_i, x_i, y_i, bx_i, by_i, moved_i)
 
-    # Second phase: if a whole CLUSTER is still tighter than the gap around
-    # its shared centroid (several landmarks anchored to nearly the same
-    # spot), fan the members out in a ring around that centroid so they
-    # don't just slide as one clump.
+
     n = len(placements)
     if n >= 2:
         cx = sum(p[1] for p in placements) / n
@@ -2373,53 +2573,12 @@ def _separate_landmark_icons(placements, icon_size, segments, max_push):
                 idx = by_index[id(p)]
                 rec, _, _, bx, by, mvd = placements[idx]
                 tx, ty, moved = _clear_landmark_of_lines(tx, ty, segments, icon_size)
-                # Fan out only a little, and never far from this icon's
-                # own stop (bx, by were previously used before assignment).
+                
                 tx, ty = _clamp_shift(cx, cy, tx, ty, min_gap * 1.15)
                 tx, ty = _clamp_shift(bx, by, tx, ty, min_gap * 1.6)
                 placements[idx] = (rec, tx, ty, bx, by, mvd or moved)
                 moved_any = True
     return moved_any
-
-
-def _plotly_landmark_path(record, size_deg=0.0019):
-    lat, lon = float(record["lat"]), float(record["lon"])
-    sx = size_deg / max(math.cos(math.radians(lat)), 0.2)
-    sy = size_deg
-    hx, hy = sx*0.5, sy*0.5
-    x, y = lon, lat
-    kind = record.get("kind", "monument")
-
-    if kind == "tower":
-        return (
-            f"M {x-hx*.32},{y+hy*.95} L {x+hx*.32},{y+hy*.95} "
-            f"L {x+hx*.22},{y-hy*.25} L {x-hx*.22},{y-hy*.25} Z "
-            f"M {x-hx*.38},{y-hy*.45} L {x+hx*.38},{y-hy*.45} "
-            f"L {x+hx*.38},{y-hy*.25} L {x-hx*.38},{y-hy*.25} Z "
-            f"M {x},{y-hy*.95} L {x-hx*.35},{y-hy*.42} L {x+hx*.35},{y-hy*.42} Z"
-        )
-    if kind == "stupa":
-        return (
-            f"M {x-hx*.72},{y+hy*.58} Q {x},{y+.02*hy} {x+hx*.72},{y+hy*.58} "
-            f"L {x+hx*.55},{y+hy*.80} L {x-hx*.55},{y+hy*.80} Z "
-            f"M {x-hx*.50},{y-hy*.18} A {hx*.50},{hy*.50} 0 1 0 "
-            f"{x+hx*.50},{y-hy*.18} A {hx*.50},{hy*.50} 0 1 0 {x-hx*.50},{y-hy*.18} Z"
-        )
-    if kind == "park":
-        return (
-            f"M {x},{y-hy*.75} A {hx*.75},{hy*.75} 0 1 0 {x},{y+hy*.75} "
-            f"A {hx*.75},{hy*.75} 0 1 0 {x},{y-hy*.75} Z "
-            f"M {x},{y+hy*.50} L {x},{y-hy*.25} "
-            f"M {x},{y-hy*.05} L {x-hx*.35},{y-hy*.38} "
-            f"M {x},{y+hy*.10} L {x+hx*.34},{y-hy*.18}"
-        )
-    if kind == "temple":
-        return (
-            f"M {x},{y-hy*.95} L {x-hx*.72},{y-hy*.05} L {x+hx*.72},{y-hy*.05} Z "
-            f"M {x-hx*.42},{y-hy*.02} L {x+hx*.42},{y-hy*.02} "
-            f"L {x+hx*.42},{y+hy*.76} L {x-hx*.42},{y+hy*.76} Z"
-        )
-    return f"M {x},{y-hy*.72} L {x+hx*.72},{y} L {x},{y+hy*.72} L {x-hx*.72},{y} Z"
 
 
 def _point_segment_dist_and_normal(px, py, ax, ay, bx, by):
@@ -2507,20 +2666,39 @@ def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.002
     line is drawn back to the landmark's real position so its true
     location is still visible.
 
-    If the landmark has a custom uploaded SVG (record["svg"]), that exact
-    SVG is embedded as a Plotly layout image -- matching what the LOOM map
-    already does with _svg_landmark_group(). Landmarks without a custom SVG
-    keep using the built-in vector shape as before.
+    Landmark artwork is embedded as a Plotly layout image, using uploaded
+    SVG artwork when available and the built-in SVG artwork otherwise.
     """
     segments = _collect_route_line_segments(fig)
     edit_meta = []   # per-landmark data the in-browser Edit mode needs
 
     for record in get_landmark_records(selected_landmarks):
-        kind = record.get("kind", "monument")
-        stroke = {
-            "temple": "#7c3aed", "tower": "#dc2626", "stupa": "#ea580c",
-            "park": "#16a34a", "monument": "#1d4ed8",
-        }.get(kind, "#1d4ed8")
+        if record["name"] == "Rani Pokhari":
+            ring = RANI_POKHARI_RING
+            path = "M " + " L ".join(
+                f"{lon:.7f},{lat:.7f}" for lon, lat in ring
+            ) + " Z"
+            fig.add_shape(
+                type="path",
+                path=path,
+                xref="x",
+                yref="y",
+                fillcolor=RANI_POKHARI_FILL,
+                line=dict(color=RANI_POKHARI_STROKE, width=1),
+                layer="below",
+            )
+            fig.add_trace(go.Scatter(
+                x=[record["lon"]],
+                y=[record["lat"]],
+                mode="markers",
+                marker=dict(size=18, color="rgba(0,0,0,0)"),
+                hovertemplate=(
+                    "<b>Rani Pokhari</b><br>"
+                    "Outline: © OpenStreetMap contributors<extra></extra>"
+                ),
+                showlegend=False,
+            ))
+            continue
 
         true_lon, true_lat = float(record["lon"]), float(record["lat"])
         # Nudge the icon off any route line it would otherwise touch --
@@ -2551,42 +2729,31 @@ def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.002
                 layer="above",
             )
 
-        placed_record = dict(record, lon=icon_lon, lat=icon_lat)
-
         custom_svg = get_landmark_custom_svg(record)
         # Per-landmark scale (e.g. Pashupati/Boudha = 0.55 in LANDMARKS):
         # shrinks the icon in data-space so it renders smaller on the map.
         landmark_scale = float(record.get("scale", 1.0) or 1.0)
         eff_icon_deg = icon_size_deg * landmark_scale
-        image_index = shape_index = None
+        image_index = len(fig.layout.images)
         if custom_svg:
-            # Longitude degrees are narrower than latitude degrees away
-            # from the equator, so widen sizex to keep the icon visually
-            # square -- same correction _plotly_landmark_path() uses.
-            sizex = eff_icon_deg / max(math.cos(math.radians(icon_lat)), 0.2)
-            sizey = eff_icon_deg
-            image_index = len(fig.layout.images)
-            fig.add_layout_image(
-                dict(
-                    source=landmark_svg_data_uri(landmark_grey_tint(custom_svg)),
-                    xref="x", yref="y",
-                    x=icon_lon, y=icon_lat,
-                    xanchor="center", yanchor="middle",
-                    sizex=sizex, sizey=sizey,
-                    sizing="contain",
-                    layer="above",
-                )
-            )
+            landmark_svg = landmark_grey_tint(custom_svg)
         else:
-            shape_index = len(fig.layout.shapes)
-            fig.add_shape(
-                type="path",
-                path=_plotly_landmark_path(placed_record),
+            landmark_svg = (
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+                f'{_svg_landmark_group(record, 50.0, 50.0, 80.0)}</svg>'
+            )
+        sizex = eff_icon_deg / max(math.cos(math.radians(icon_lat)), 0.2)
+        fig.add_layout_image(
+            dict(
+                source=landmark_svg_data_uri(landmark_svg),
                 xref="x", yref="y",
-                line=dict(color=stroke, width=2.5),
-                fillcolor="white",
+                x=icon_lon, y=icon_lat,
+                xanchor="center", yanchor="middle",
+                sizex=sizex, sizey=eff_icon_deg,
+                sizing="contain",
                 layer="above",
             )
+        )
         # Name label: hidden by default, revealed only when the icon is
         # touched/tapped (mobile) or hovered (desktop) -- a real click-to-
         # toggle needs custom JS wired into the embedded plot HTML, but an
@@ -2606,7 +2773,6 @@ def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.002
                 sizey=eff_icon_deg / 0.8,
                 body=_svg_landmark_group(record, 50.0, 50.0, 80.0),
                 image_index=image_index,
-                shape_index=shape_index,
                 leader_index=leader_index,
             ))
         except Exception:
@@ -4842,6 +5008,16 @@ def apply_landmark_overrides(svg, overrides):
     return ET.tostring(root, encoding='unicode')
 
 
+LANDMARK_LAYOUT_VERSION = "pinned-anchor-v6"  # bump when placement code changes
+
+
+def landmark_layout_signature():
+    """Changes whenever LANDMARKS is edited, so cached maps are not reused."""
+    return hashlib.md5(
+        (LANDMARK_LAYOUT_VERSION + json.dumps(LANDMARKS, sort_keys=True, default=str)).encode()
+    ).hexdigest()
+
+
 @st.cache_data(show_spinner=False)
 def generate_loom_svg(
     selected_routes_tuple,
@@ -4855,7 +5031,10 @@ def generate_loom_svg(
     landmark_icon_size=28,
     show_river=False,
     show_road=False,
+    landmark_layout_sig="",
 ):
+    # landmark_layout_sig is unused in the body; it only exists so st.cache_data
+    # re-runs when LANDMARKS (anchor/side/...) or the placement code changes.
     if not selected_routes_tuple:
         raise ValueError("Please select at least one route.")
     check_loom_installation()
@@ -5799,7 +5978,6 @@ TRANSIT_EDIT_JS = r'''(function () {
     icons.forEach(function (ic) {
       var m = ic.m;
       if (m.image_index != null && imgs[m.image_index]) imgs[m.image_index].visible = false;
-      if (m.shape_index != null) upd['shapes[' + m.shape_index + '].visible'] = false;
       if (m.leader_index != null) upd['shapes[' + m.leader_index + '].visible'] = false;
       imgs.push(imgSpec(ic)); ic.idx = imgs.length - 1;
     });
@@ -6008,6 +6186,55 @@ TRANSIT_EDIT_JS = r'''(function () {
     gd.on('plotly_afterplot', schedule);
     gd.on('plotly_relayout', schedule);
     applySaved();
+
+    // ---- progressive road-name labels ---------------------------
+    // The road-label text traces (uid road-labels-l0..l3) are ranked by
+    // how long the labelled road is: l0 = longest/most important. At the
+    // initial view only l0 shows; each further zoom step (x1.8 of the
+    // base x-span) reveals the next level. Pan/zoom any other way just
+    // re-evaluates the rule, so labels appear/disappear consistently.
+    function roadLabelZoomFilter(relayout) {
+      var meta = gd.layout && gd.layout.meta;
+      if (!meta || !meta.roadLabelSpan) return;
+      var base = meta.roadLabelSpan;
+      var x0 = (relayout && relayout['xaxis.range[0]'] != null)
+        ? relayout['xaxis.range[0]'] : null;
+      var x1 = (relayout && relayout['xaxis.range[1]'] != null)
+        ? relayout['xaxis.range[1]'] : null;
+      if (x0 == null) {
+        var xr = gd.layout.xaxis && gd.layout.xaxis.range;
+        if (!xr || xr[0] == null) return;
+        x0 = xr[0]; x1 = xr[1];
+      }
+      if (x1 == null) return;
+      var zoom = base / Math.max(x1 - x0, 1e-9);
+      var maxLevel = 0;
+      if (zoom >= 1.8) maxLevel = 1;
+      if (zoom >= 3.2) maxLevel = 2;
+      if (zoom >= 5.5) maxLevel = 3;
+      var upd = {};
+      for (var lv = 0; lv <= 3; lv++) {
+        var i = gd.data.findIndex(function (t) {
+          return t.uid === 'road-labels-l' + lv;
+        });
+        if (i === -1) continue;
+        var want = (lv <= maxLevel);
+        if (gd.data[i].visible === want) continue;  // skip no-op updates
+        upd['data[' + i + '].visible'] = want;
+      }
+      // Only relayout when something actually changed, and guard against
+      // re-entrancy: this handler fires on plotly_relayout, and calling
+      // Plotly.relayout() from inside it would fire the event again and
+      // could loop -- which is what made the map feel frozen.
+      if (!Object.keys(upd).length || roadLabelBusy) return;
+      roadLabelBusy = true;
+      Plotly.relayout(gd, upd).then(function () { roadLabelBusy = false; })
+                           .catch(function () { roadLabelBusy = false; });
+    }
+    var roadLabelBusy = false;
+    gd.on('plotly_relayout', roadLabelZoomFilter);
+    // initial state (in case level-0 changed since build)
+    roadLabelZoomFilter(null);
   });
 })();
 '''
@@ -6125,7 +6352,14 @@ def display_loom_svg(
         'font-weight:400; line-height:1.2; color:#222;">Station name</div>'
     )
 
-    loom_edit_key = hashlib.md5(svg.encode("utf-8")).hexdigest()[:12]
+    # Stable edit-key: keyed by the selected routes, NOT the SVG bytes.
+    # The SVG changes slightly on every regeneration, so hashing it made
+    # the in-browser Edit mode lose saved icon/label positions whenever
+    # the map was re-rendered. Route selection is stable across re-runs,
+    # so edits persist (until a different route set is chosen).
+    loom_edit_key = hashlib.md5(
+        "|".join(sorted(selected_routes)).encode("utf-8")
+    ).hexdigest()[:12]
     loom_edit_js = LOOM_EDIT_JS.replace("__EDIT_KEY__", loom_edit_key)
 
     html_code = f"""
@@ -6135,6 +6369,21 @@ def display_loom_svg(
         /* Make the LOOM SVG itself fill the wrapper width so the map
            renders as a wide frame, not a small fixed-width image. */
         #loom-img svg {{ width: 100% !important; height: auto !important; display: block; }}
+        /* Hover tooltip: a floating name card that follows the cursor over
+           landmarks, roads, rivers and stop markers. Native SVG <title>
+           tooltips are delayed/inconsistent, so this custom one is driven
+           by the same data (a <title> child) but styled and positioned
+           like a real tooltip. */
+        #loom-hover-tip {{
+          position: absolute; display: none; z-index: 30; pointer-events: none;
+          background: #fff; color: #111; border: 1px solid #bbb;
+          border-radius: 6px; padding: 5px 10px; font: 600 13px Arial, sans-serif;
+          box-shadow: 0 2px 8px rgba(0,0,0,.18); white-space: nowrap;
+          max-width: 320px; overflow: hidden; text-overflow: ellipsis;
+        }}
+        /* Route lines / rivers / roads highlight subtly while hovered. */
+        #loom-img .loom-hoverable path {{ transition: opacity .12s ease; }}
+        #loom-img .loom-hoverable path:hover {{ opacity: .72; }}
       </style>
       <div id="loom-toolbar" style="display:flex; gap:6px; align-items:center;
            flex-wrap:wrap; padding:6px 10px; background:#f3f4f6; border-bottom:1px solid #ddd;">
@@ -6346,6 +6595,88 @@ def display_loom_svg(
                 group.addEventListener('touchstart', function(event) {{ event.stopPropagation(); showLandmarkLabel(group); group.classList.add('landmark-pinned'); }}, {{passive:true}});
                 group.addEventListener('focus', function() {{ showLandmarkLabel(group); }});
             }});
+
+            // ---- HOVER TOOLTIP -----------------------------------------
+            // A floating name card that follows the cursor over landmarks,
+            // roads, rivers and route lines. Names come from each element's
+            // existing <title> child (already generated for roads) or from
+            // data attributes for landmarks; stops use the nearest station
+            // label text. The custom card is styled and immediate, unlike
+            // the slow native SVG <title> tooltip.
+            const hoverTip = document.createElement('div');
+            hoverTip.id = 'loom-hover-tip';
+            document.getElementById('loom-wrapper').appendChild(hoverTip);
+            let hoverTarget = null;
+
+            function loomHoverName(el) {{
+                // Landmark groups: use their data name.
+                const lm = el.closest && el.closest('g.loom-landmark');
+                if (lm) {{
+                    const name = lm.getAttribute('data-landmark-name');
+                    return name ? '\\uD83D\\uDCFD ' + name : null;
+                }}
+                // Roads / rivers: <title> child carries the name.
+                if (el.tagName && el.tagName.toLowerCase() === 'path') {{
+                    const inRoad = el.closest && el.closest('g.loom-road');
+                    const inRiver = el.closest && el.closest('g.loom-river');
+                    const t = el.querySelector('title');
+                    const name = t ? t.textContent.trim() : null;
+                    if (inRoad && name) return '\\uD83D\\uDEE3 ' + name;
+                    if (inRiver && name) return '\\uD83D\\uDE6E ' + name;
+                    if (name) return name;
+                }}
+                // Stop markers (LOOM station symbols): nearest label text.
+                if (el.tagName && el.tagName.toLowerCase() === 'circle') {{
+                    const cx = parseFloat(el.getAttribute('cx'));
+                    const cy = parseFloat(el.getAttribute('cy'));
+                    if (!isNaN(cx) && !isNaN(cy)) {{
+                        let best = null, bestD = 1e9;
+                        document.querySelectorAll('#loom-img text.station-label').forEach(function (lb) {{
+                            const b = lb.getBBox();
+                            const bx = b.x + b.width / 2, by = b.y + b.height / 2;
+                            const d = Math.hypot(bx - cx, by - cy);
+                            if (d < bestD) {{ bestD = d; best = lb; }}
+                        }});
+                        if (best && bestD < 40) {{
+                            const name = (best.textContent || '').replace(/\\s+/g, ' ').trim();
+                            if (name) return '\\uD83D\\uDE8F ' + name;
+                        }}
+                    }}
+                }}
+                return null;
+            }}
+
+            function loomShowTip(text, ev) {{
+                hoverTip.textContent = text;
+                hoverTip.style.display = 'block';
+                loomPositionTip(ev);
+            }}
+            function loomPositionTip(ev) {{
+                const wrap = document.getElementById('loom-wrapper').getBoundingClientRect();
+                const x = ev.clientX - wrap.left + 14;
+                const y = ev.clientY - wrap.top + 14;
+                hoverTip.style.left = Math.min(Math.max(6, x), wrap.width - hoverTip.offsetWidth - 6) + 'px';
+                hoverTip.style.top = Math.min(Math.max(6, y), wrap.height - hoverTip.offsetHeight - 6) + 'px';
+            }}
+            function loomHideTip() {{
+                hoverTip.style.display = 'none';
+            }}
+
+            loomImg.addEventListener('pointermove', function (event) {{
+                // Ignore while panning or while Edit mode is active.
+                if (loomDragging || (loomImg.classList.contains('ed-on'))) {{ loomHideTip(); return; }}
+                const target = event.target;
+                const name = target === hoverTarget ? hoverTip.dataset.name : loomHoverName(target);
+                if (name) {{
+                    if (target !== hoverTarget) {{ hoverTarget = target; hoverTip.dataset.name = name; }}
+                    loomShowTip(name, event);
+                }} else {{
+                    hoverTarget = null;
+                    loomHideTip();
+                }}
+            }}, true);
+            loomImg.addEventListener('pointerdown', loomHideTip);
+            loomImg.addEventListener('pointerleave', loomHideTip);
 
             // Size the viewer to the map's own aspect ratio, then apply
             // the initial (unzoomed) transform, so the whole map is
@@ -7161,10 +7492,10 @@ def img_to_base64(path):
             return base64.b64encode(f.read()).decode()
     except FileNotFoundError:
         return ""
-img = img_to_base64("image.png")
+img = img_to_base64("image1.jpeg")
 
 # Flags: set to True to bring back the banner / the charts and detail sections.
-SHOW_BANNER = False
+SHOW_BANNER = True
 SHOW_EXTRA_SECTIONS = False
 
 if SHOW_BANNER:
@@ -7794,6 +8125,7 @@ with col_map1:
                                 landmark_icon_size=28 * landmark_icon_scale,
                                 show_river=loom_river_on,
                                 show_road=loom_road_on,
+                                landmark_layout_sig=landmark_layout_signature(),
                             )
 
                         if loom_road_on and 'class="loom-road"' not in svg:
