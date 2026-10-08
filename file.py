@@ -13,13 +13,19 @@ import tempfile
 import zipfile
 import shutil
 import os
+import json
 import base64
 import html
 import shlex
 import re
 import math
+import hashlib
 import platform
 import xml.etree.ElementTree as ET
+
+ET.register_namespace("", "http://www.w3.org/2000/svg")
+ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+
 st.set_page_config(layout="wide")
 
 pio.templates.default = "plotly_dark"
@@ -348,7 +354,9 @@ div[data-testid="stPlotlyChart"] {
 """, unsafe_allow_html=True)
 # ================= DB =================
 def get_engine():
-    return sqlalchemy.create_engine(st.secrets["DB_URL"])
+    db_url = st.secrets["DB_URL"]
+    return sqlalchemy.create_engine(db_url)
+
 
 # ================= DATA =================
 @st.cache_data
@@ -439,10 +447,6 @@ def get_route_agency_map():
     return dict(zip(merged["route_id"], merged["agency_name"]))
 
 # ================= SHARED ROUTE COLORS (SINGLE SOURCE OF TRUTH) =================
-# Every route gets ONE color name + ONE hex value, assigned here and reused
-# everywhere: the sidebar checkboxes/emoji swatches, the Live folium map,
-# the Plotly "Transit Map", and the LOOM SVG map. This is what makes the
-# LOOM map's colors match the route colors the user selects in the sidebar.
 ROUTE_COLOR_NAMES = [
     "blue", "red", "green", "purple", "orange", "black", "brown", "grey"
 ]
@@ -470,7 +474,10 @@ COLOR_EMOJI_MAP = {
 }
 
 MAJOR_TRANSIT_STOPS = {
-    "kalanki", "chabahil", "koteshwor", "balkhu",
+    "kalanki",
+    "chabahil",
+    "koteshwor",
+    "balkhu",
 }
 
 
@@ -481,6 +488,2310 @@ def is_major_transit_stop(stop_name):
         normalized == major or normalized.startswith(major + " ")
         for major in MAJOR_TRANSIT_STOPS
     )
+
+
+
+# =========================================================
+# VECTOR LANDMARKS
+# =========================================================
+LANDMARKS = {
+    "Pashupati Temple": {"lat":27.710637, "lon": 85.349527, "svg": "new_icon/pashupati.svg", "scale": 0.95, "anchor": "Gaushala", "anchor2": "Pingalsthan Gaushala", "t": 0.5, "side": 1, "offset": 1.2},
+        "Dharahara": {"lat": 27.701755, "lon": 85.310071, "svg": "new_icon/Dharahara.svg", "anchor": "Shahid Gate Bus Stop", "side": -1, "offset": 0.85},
+        "Boudhanath Stupa": {"lat": 27.722685, "lon":  85.359812, "svg": "new_icon/boudhastupa.svg", "scale": 0.55, "anchor": "Chabahil Bus Station2", "anchor2": "Chabahil Bus Stop1", "t": 0.58, "side": 1, "offset": 0.8},
+        "Swayambhunath": {"lat":27.714522, "lon": 85.288690, "svg": "new_icon/Swayambhu.svg", "anchor": "Thulo Bharyang1", "anchor2": "Swayambhu Bus Stop1", "t": 0.5, "side": 1, "offset": 0.75},
+        "Tribhuvan International Airport": {"lat": 27.696670, "lon": 85.360190, "svg": "new_icon/Airport.svg","scale": 0., "anchor": "Sinamangal Chowk", "anchor2": "Koteshwor Bus Stop3", "t": 0.65, "side": 1, "offset": 1.2},
+        "UN Park": {"lat":27.6854334117676, "lon":85.3257565314652, "svg": "new_icon/UN PARK.svg", "anchor": "Kupondole Bus Stop1", "anchor2": "Krishna Galli Bus Stop2", "t": 0.6, "side": -1, "offset": 0.75},
+        "Kathmandu Fun Park": {"lat": 27.700810, "lon": 85.328657, "svg": "new_icon/KATHMANDU FUN PARK.svg", "anchor": "Tundikhel Bus Stop", "side": 1, "offset": 1.5},
+        "ZOO": {"lat": 27.674287, "lon": 85.309118, "svg": "new_icon/ZOO.svg", "anchor": "Satdobato_Lagankhel Road", "side": -1, "offset": 1.2},
+        "Narayanhiti Palace Museum": {"lat": 27.71491540425667, "lon": 85.31810084081023, "svg": "new_icon/Narayanhiti Durbar Museum.svg","scale": 0.6, "anchor": "Narayanhiti Marg Bus Stop", "anchor2": "Ramayan Barahi", "t": 0, "side": -1, "offset": 0.95},
+        "Bir Hospital": {"lat": 27.706729, "lon": 85.310652, "svg": "new_icon/Bir Hospital.svg", "scale": 0.6, "anchor": ["Ratna Park Bus Station1", "Bir Hospital Bus Stop"], "anchor2": "Nac Bus Stop", "t": 0.5, "side": -1, "offset": 1.5},
+        "Basantapur  Durbar Square": {"lat": 27.705431, "lon": 85.304379, "svg": "new_icon/BDS 1.svg", "anchor": "Ratna Park Micro Bus Stop", "side": -1, "offset": 1.8},
+        "Patan Durbar Square": {"lat": 27.672660069722838, "lon":  85.32555712962338, "svg": "new_icon/PDS.svg", "anchor": "Ekantakuna1", "side": 1, "offset": 1.0},
+        "Mhepi":{"lat": 27.722499, "lon": 85.303104, "svg": "new_icon/Mehpi.svg", "anchor": "Yerahiti", "anchor2": "Thulo Bharyang1", "t": 0.5, "side": 1, "offset": 0.6},
+        "Macchapokhari Bus Park": {"lat": 27.730661, "lon": 85.310039, "svg": "new_icon/Macchapokhari bus park.svg", "anchor": "Machha Pokhari", "side": -1, "offset": 1.0},
+        "Rani Pokhari":{"lat": 27.70780675, "lon": 85.3153348, "svg": "new_icon/Rani_Pokhari.svg", "scale": 0.448, "anchor": "Lainchaur Bus Station", "anchor2": ["Ratna Park Bus Station1", "Bir Hospital Bus Stop"], "t": 0.68, "side": -1, "offset": 0.75},
+        "Chauni": {"lat": 27.707246, "lon": 85.293175, "svg": "new_icon/chaune.svg","anchor": "Swayambhu Bus Stop1", "anchor2": "Sitapaila Stop", "t": 0.5, "side": 1, "offset": 1.0},
+        "Gopi Krishna Hall": {"lat": 27.724308, "lon": 85.351880, "svg": "new_icon/cinema_hall.svg", "scale": 0.55, "anchor": "Sukedhara2", "anchor2": "Gopi Krishna Bus Stop", "t": 0.24, "side": 1, "offset": 1.2},
+        "Bhandarkhal": {"lat": 27.708326, "lon": 85.337344, "svg": "new_icon/Bhandarkhal.svg", "scale": 0.95, "anchor": "Gaushala", "anchor2": "Jaya Bageshwori", "t": 0.24, "side": -1, "offset": 1.2},
+        "Kamal Pokhari": {"lat": 27.709880, "lon": 85.329843, "svg": "new_icon/Kamal Pokhari.svg", "scale": 0.55}
+}
+DEFAULT_LANDMARKS = tuple(LANDMARKS.keys())
+
+# Rani Pokhari shoreline from OpenStreetMap way 21565774. Keep the real
+# geographic outline so the pond fits its surrounding roads at map scale.
+RANI_POKHARI_RING = (
+    (85.3144768, 27.7072647),
+    (85.3161147, 27.7072244),
+    (85.3161928, 27.7083511),
+    (85.3145111, 27.7083891),
+    (85.3145087, 27.7078399),
+    (85.3152384, 27.7078270),
+    (85.3152395, 27.7078870),
+    (85.3154215, 27.7078825),
+    (85.3154164, 27.7077190),
+    (85.3152344, 27.7077234),
+    (85.3152376, 27.7077940),
+    (85.3145080, 27.7078067),
+    (85.3144768, 27.7072647),
+)
+RANI_POKHARI_FILL = "rgba(75,193,235,0.4)"
+RANI_POKHARI_STROKE = "rgba(127,169,184,0.55)"
+
+
+def get_landmark_records(selected_landmarks):
+    records = []
+    for name in selected_landmarks or ():
+        if name not in LANDMARKS:
+            continue
+        record = dict(LANDMARKS[name])
+        record["name"] = name
+        try:
+            record["lat"] = float(record["lat"])
+            record["lon"] = float(record["lon"])
+        except (TypeError, ValueError):
+            continue
+        records.append(record)
+    return records
+
+
+# =========================================================
+# MAP DATA LAYERS: RIVERS + ROADS (your own GeoJSON files)
+# =========================================================
+
+RIVER_COLOR = "#a8d4f2"
+RIVER_LABEL_COLOR = "#2f6fa3"
+RIVER_BBOX = (27.55, 85.15, 27.85, 85.60)  # south, west, north, east
+RIVER_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
+# -------------------------------------------------------------------
+# CARTOGRAPHIC ROAD STYLE FOR THE TRANSIT MAP
+# -------------------------------------------------------------------
+ROAD_CASING_COLOR = "#a8a8a8"
+ROAD_SURFACE_COLOR = "#f4f4f4"   # light surface so the road edges read clearly
+
+
+ROAD_CASING_COLORS = {
+    "primary":   "#d1cdcd",   # primary: neutral grey outline
+    "secondary": "#eecb58",   # trunk:   golden outline
+}
+ROAD_SURFACE_COLORS = {
+    "primary":   "#f4f4f4",   # primary: light grey/white fill
+    "secondary": "#fefae8",   # trunk:   pale yellow fill
+}
+
+# Screen-pixel widths. Much thinner than before so neighbouring roads no
+# longer fuse into one grey mass.
+ROAD_CASING_WIDTH = {
+    "primary": 10.0,     # primary roads
+    "secondary": 16.0,  # trunk roads (wider than primary)
+    "tertiary": 5.5,
+    "other": 4.0,
+}
+ROAD_SURFACE_WIDTH = {
+    "primary": 8.0,     # primary roads
+    "secondary": 12.0,   # trunk roads (wider than primary)
+    "tertiary": 3.5,
+    "other": 2.5,
+}
+
+ROAD_DRAW_ORDER = {"other": 0, "tertiary": 1, "primary": 2, "secondary": 3}
+ROAD_COLOR = ROAD_SURFACE_COLOR
+ROAD_HIERARCHY_WIDTH = ROAD_SURFACE_WIDTH
+ROAD_BBOX = (27.55, 85.15, 27.85, 85.60)  # south, west, north, east
+
+RIVER_ALLOW_OSM_FALLBACK = False   # True = download from OSM when no local file
+ROAD_ALLOW_OSM_FALLBACK = False
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _data_candidates(*names):
+    """Existing-or-not paths, script folder first, then the working dir."""
+    out = []
+    for base in (_SCRIPT_DIR, os.getcwd()):
+        for name in names:
+            p = os.path.join(base, "data", name)
+            if p not in out:
+                out.append(p)
+    return tuple(out)
+
+
+RIVER_DATA_FILES = _data_candidates(
+    "kathmandu_rivers.geojson",
+     "kathmandu_rivers.json",
+)
+ROAD_DATA_FILES = _data_candidates(
+     "kathmandu_road.geojson", "kathmandu_road.gpkg",
+)
+RIVER_CACHE_FILE = os.path.join(_SCRIPT_DIR, "data", "kathmandu_rivers_osm_cache.json")
+
+
+def _file_signature(paths):
+    """(path, mtime) for each existing file: changes when a file is edited,
+    so st.cache_data reloads it."""
+    sig = []
+    for p in paths:
+        if os.path.isfile(p):
+            sig.append((p, os.path.getmtime(p)))
+    return tuple(sig)
+
+
+# ---------------------------------------------------------
+# Shared GeoJSON helpers
+# ---------------------------------------------------------
+def _guess_epsg(obj, sample_xy):
+    """EPSG code of a projected GeoJSON, from its `crs` member, else guessed
+    from the coordinate magnitude (Kathmandu: UTM 45N or Web Mercator)."""
+    try:
+        name = obj["crs"]["properties"]["name"]
+        m = re.search(r"(\d{4,6})\s*$", str(name))
+        if m:
+            return int(m.group(1))
+    except (KeyError, TypeError):
+        pass
+    x, _y = sample_xy
+    return 3857 if abs(x) > 1_000_000 else 32645
+
+
+def _make_reprojector(obj):
+    """Return f(x, y) -> (lon, lat). Identity when coords already look like
+    lon/lat; uses pyproj when the file is in a projected CRS."""
+    sample = None
+    for feat in (obj or {}).get("features") or []:
+        geom = (feat or {}).get("geometry") or {}
+        stack = [geom.get("coordinates")]
+        while stack:
+            c = stack.pop()
+            if isinstance(c, (list, tuple)) and c:
+                if isinstance(c[0], (int, float)):
+                    sample = (float(c[0]), float(c[1]))
+                    break
+                stack.extend(c)
+        if sample:
+            break
+    if sample is None or (abs(sample[0]) <= 180 and abs(sample[1]) <= 90):
+        return lambda x, y: (x, y)
+    try:
+        from pyproj import Transformer
+    except ImportError as exc:
+        raise RuntimeError(
+            "GeoJSON is not in lon/lat (EPSG:4326) and `pyproj` is not "
+            "installed. Run `pip install pyproj`, or re-export the file as "
+            "EPSG:4326."
+        ) from exc
+    tr = Transformer.from_crs(_guess_epsg(obj, sample), 4326, always_xy=True)
+    return lambda x, y: tr.transform(x, y)
+
+
+def _iter_geom_lines(geom, include_polygons=False):
+    """Yield coordinate lists from LineString / MultiLineString /
+    GeometryCollection (and optionally polygon outlines)."""
+    if not isinstance(geom, dict):
+        return
+    gtype, coords = geom.get("type"), geom.get("coordinates")
+    if gtype == "LineString":
+        yield coords
+    elif gtype == "MultiLineString":
+        for line in coords or []:
+            yield line
+    elif gtype == "GeometryCollection":
+        for g in geom.get("geometries") or []:
+            yield from _iter_geom_lines(g, include_polygons)
+    elif include_polygons and gtype == "Polygon":
+        for ring in coords or []:
+            yield ring
+    elif include_polygons and gtype == "MultiPolygon":
+        for poly in coords or []:
+            for ring in poly or []:
+                yield ring
+
+
+def _clean_pts(coords, project):
+    pts = []
+    for c in coords or []:
+        try:
+            lon, lat = project(float(c[0]), float(c[1]))
+        except (TypeError, ValueError, IndexError):
+            continue
+        pts.append((float(lon), float(lat)))
+    return pts
+
+
+def _read_json_file(path):
+    with open(path, "r", encoding="utf-8-sig") as fh:   # utf-8-sig tolerates a BOM
+        return json.load(fh)
+
+
+# ---------------------------------------------------------
+# ROADS
+# ---------------------------------------------------------
+def _road_hierarchy(road_class, road_name=""):
+    """Map a road class tag onto a coarse bucket (picks the line width only)."""
+    text = f"{road_class} {road_name}".lower()
+    # Trunk roads get their own (wider) width bucket. It reuses the
+    # "secondary" slot because this dataset only has trunk + primary roads.
+    if "trunk" in str(road_class or "").lower():
+        return "secondary"
+    if any(k in text for k in ("primary", "trunk", "motorway", "frn", "f0", "f1", "highway")):
+        return "primary"
+    if "secondary" in text or "rrn" in text:
+        return "secondary"
+    if "tertiary" in text:
+        return "tertiary"
+    return "other"
+
+
+def _road_props(props):
+    props = props or {}
+    name = (props.get("road_name") or props.get("link_name") or props.get("name:en")
+            or props.get("name_en") or props.get("name") or props.get("NAME")
+            or props.get("Name"))
+    road_class = (props.get("road_class") or props.get("highway")
+                  or props.get("fclass") or props.get("type") or props.get("TYPE"))
+    return name, _road_hierarchy(road_class, props.get("road_name") or name or "")
+
+
+def _extract_road_lines(feat):
+    """Yield (name, hierarchy, coords) for each line in a feature."""
+    name, hierarchy = _road_props((feat or {}).get("properties"))
+    for line in _iter_geom_lines((feat or {}).get("geometry")):
+        yield name, hierarchy, line
+
+
+def _parse_road_data(obj):
+    """GeoJSON FeatureCollection -> tuple of (name, hierarchy, pts), clipped
+    to the valley bbox (runs inside the bbox stay separate polylines)."""
+    s, w, n, e = ROAD_BBOX
+    roads = []
+    if not isinstance(obj, dict) or "features" not in obj:
+        return tuple(roads)
+    project = _make_reprojector(obj)
+    for feat in obj.get("features") or []:
+        for name, hierarchy, coords in _extract_road_lines(feat):
+            label = str(name or "Road").strip() or "Road"
+            run = []
+            for lon, lat in _clean_pts(coords, project):
+                if w <= lon <= e and s <= lat <= n:
+                    run.append((lon, lat))
+                else:
+                    if len(run) >= 2:
+                        roads.append((label, hierarchy, tuple(run)))
+                    run = []
+            if len(run) >= 2:
+                roads.append((label, hierarchy, tuple(run)))
+    return tuple(roads)
+
+
+def _fetch_roads_from_overpass():
+    """Optional fallback: named roads in the valley from OpenStreetMap."""
+    import urllib.parse
+    import urllib.request
+
+    s, w, n, e = ROAD_BBOX
+    query = (
+        "[out:json][timeout:120];"
+        f'way["highway"~"^(primary|secondary|tertiary|trunk|residential)$"]["name"]({s},{w},{n},{e});'
+        "out geom;"
+    )
+    request = urllib.request.Request(
+        RIVER_OVERPASS_URL,
+        data=urllib.parse.urlencode({"data": query}).encode("utf-8"),
+        headers={"User-Agent": "kathmandu-transit-map/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    features = []
+    for el in payload.get("elements", []):
+        tags = el.get("tags") or {}
+        coords = [[g["lon"], g["lat"]] for g in (el.get("geometry") or [])]
+        features.append({
+            "properties": {"name": tags.get("name:en") or tags.get("name"),
+                           "road_class": tags.get("highway")},
+            "geometry": {"type": "LineString", "coordinates": coords},
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _read_road_gpkg(path):
+    """GeoPackage roads (needs geopandas). Returns a tuple, maybe empty."""
+    import sqlite3
+    conn = sqlite3.connect(path)
+    try:
+        rows = [r[0] for r in conn.execute(
+            "SELECT table_name FROM gpkg_contents WHERE data_type='features'")]
+    finally:
+        conn.close()
+    if not rows:
+        return ()
+    import geopandas as gpd
+    gdf = gpd.read_file(path, layer=rows[0])
+    if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs(4326)
+    gdf = gdf[gdf.geometry.geom_type.isin(("LineString", "MultiLineString"))]
+    s, w, n, e = ROAD_BBOX
+    roads = []
+    for _, row in gdf.iterrows():
+        name, hierarchy = _road_props(row.to_dict())
+        geom = row.geometry
+        lines = [geom] if geom.geom_type == "LineString" else list(geom.geoms)
+        for line in lines:
+            pts = [(float(x), float(y)) for x, y in line.coords
+                   if w <= x <= e and s <= y <= n]
+            if len(pts) >= 2:
+                roads.append((str(name or "Road").strip() or "Road", hierarchy, tuple(pts)))
+    return tuple(roads)
+
+
+@st.cache_data(show_spinner="Loading roads...")
+def _cached_road_paths(signature):
+    # `signature` = ((path, mtime), ...) so editing the file busts the cache.
+    for path, _mtime in signature:
+        if path.lower().endswith((".json", ".geojson")):
+            roads = _parse_road_data(_read_json_file(path))
+        elif path.lower().endswith(".gpkg"):
+            roads = _read_road_gpkg(path)
+        else:
+            continue
+        if not roads:
+            raise RuntimeError(
+                f"{os.path.basename(path)} was found but no road lines fall "
+                f"inside the bbox {ROAD_BBOX} (check geometry type is "
+                "LineString/MultiLineString and coordinates are lon/lat)."
+            )
+        return roads
+
+    if not ROAD_ALLOW_OSM_FALLBACK:
+        raise FileNotFoundError(
+            "no local road file found. Looked for: " + ", ".join(ROAD_DATA_FILES)
+        )
+    roads = _parse_road_data(_fetch_roads_from_overpass())
+    if not roads:
+        raise RuntimeError("no roads returned for the Kathmandu Valley area")
+    return roads
+
+
+def load_road_paths():
+    """Returns (roads, error_message). roads = ((name, hierarchy, pts), ...)"""
+    try:
+        return _cached_road_paths(_file_signature(ROAD_DATA_FILES)), ""
+    except Exception as exc:
+        return (), f"{type(exc).__name__}: {exc}"
+
+
+def road_unavailable_message(error_message=""):
+    return (
+        "Road data could not be loaded"
+        + (f" ({error_message})" if error_message else "")
+        + ". Put `trunk.geojson` in the `data` folder next to the app."
+    )
+
+
+# ---------------------------------------------------------
+# CORRIDOR SHARING: how many other roads pass through the same
+# corridor as a given road. Used to widen busy corridors (where
+# several roads overlap/converge) so their usage shows on the map.
+# ---------------------------------------------------------
+_ROAD_SHARE_CELL = 0.001      # ~110 m grid cell for the point index
+_ROAD_SHARE_RADIUS = 0.003    # ~330 m: points closer than this share a corridor
+_ROAD_SHARE_SAMPLES = 24      # max sampled points checked per road
+
+
+def _road_corridor_counts(roads):
+    """For each road in `roads` ((name, hierarchy, pts), ...), count how
+    many DISTINCT other named roads pass through the same corridor.
+
+    Two roads share a corridor when a sampled point of one lies within
+    _ROAD_SHARE_RADIUS of a sampled point of the other. A coarse grid
+    index keeps this from being an O(N^2) scan over every point.
+
+    Returns a list parallel to `roads`: an integer count per road.
+    """
+    n = len(roads)
+    counts = [0] * n
+    if n < 2:
+        return counts
+
+    # Sample a bounded number of points per road (roads are long polylines;
+    # a handful of well-spread samples is enough to detect corridor overlap).
+    samples = []
+    for _name, _hierarchy, pts in roads:
+        step = max(1, len(pts) // _ROAD_SHARE_SAMPLES)
+        samples.append(pts[::step])
+
+    cells = {}
+    for i, pts in enumerate(samples):
+        for lon, lat in pts:
+            cells.setdefault(
+                (int(lon / _ROAD_SHARE_CELL), int(lat / _ROAD_SHARE_CELL)), []
+            ).append(i)
+
+    reach = int(_ROAD_SHARE_RADIUS / _ROAD_SHARE_CELL)
+    radius_sq = _ROAD_SHARE_RADIUS ** 2
+
+    for i in range(n):
+        neighbors = set()
+        for lon, lat in samples[i]:
+            cx, cy = int(lon / _ROAD_SHARE_CELL), int(lat / _ROAD_SHARE_CELL)
+            for dx in range(-reach, reach + 1):
+                for dy in range(-reach, reach + 1):
+                    for j in cells.get((cx + dx, cy + dy), ()):
+                        if j == i:
+                            continue
+                        if roads[j][0] == roads[i][0]:
+                            continue  # same road name, not "another road"
+                        for plon, plat in samples[j]:
+                            dlon = plon - lon
+                            if abs(dlon) > _ROAD_SHARE_RADIUS:
+                                continue
+                            dlat = plat - lat
+                            if dlon * dlon + dlat * dlat <= radius_sq:
+                                neighbors.add(roads[j][0])
+                                break
+        counts[i] = len(neighbors)
+    return counts
+
+
+def _corridor_width_multiplier(count):
+    """Width scale for a road carrying `count` other roads in its corridor.
+    Grows with usage but is capped so the busiest highway doesn't balloon."""
+    return 1.0  # constant width per road class: no stepped edges
+
+
+# ---------------------------------------------------------
+# RIVERS
+# ---------------------------------------------------------
+def _parse_river_data(obj):
+    """GeoJSON (lines, or polygon outlines) or our own list of
+    {"name", "kind", "coords": [[lon, lat], ...]} -> [(name, kind, pts)]."""
+    rivers = []
+
+    def add(name, kind, coords, project=lambda x, y: (x, y)):
+        pts = _clean_pts(coords, project)
+        if len(pts) >= 2:
+            kind = "river" if str(kind or "river").lower() == "river" else "stream"
+            rivers.append((str(name or "River").strip() or "River", kind, tuple(pts)))
+
+    if isinstance(obj, dict) and "features" in obj:
+        project = _make_reprojector(obj)
+        for feat in obj.get("features") or []:
+            geom = (feat or {}).get("geometry") or {}
+            props = (feat or {}).get("properties") or {}
+            name = (props.get("name:en") or props.get("name") or props.get("NAME")
+                    or props.get("Name") or props.get("name:ne") or props.get("alt_name"))
+            kind = props.get("waterway") or props.get("kind") or props.get("fclass")
+            for line in _iter_geom_lines(geom, include_polygons=True):
+                add(name, kind, line, project)
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, dict):
+                add(item.get("name"), item.get("kind"), item.get("coords"))
+    return rivers
+
+
+def _fetch_rivers_from_overpass():
+    import urllib.parse
+    import urllib.request
+
+    s, w, n, e = RIVER_BBOX
+    query = (
+        "[out:json][timeout:60];"
+        f'way["waterway"~"^(river|stream)$"]["name"]({s},{w},{n},{e});'
+        "out geom;"
+    )
+    request = urllib.request.Request(
+        RIVER_OVERPASS_URL,
+        data=urllib.parse.urlencode({"data": query}).encode("utf-8"),
+        headers={"User-Agent": "kathmandu-transit-map/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=90) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    rivers = []
+    for el in payload.get("elements", []):
+        tags = el.get("tags") or {}
+        coords = [[g["lon"], g["lat"]] for g in (el.get("geometry") or [])]
+        rivers.append({
+            "name": tags.get("name:en") or tags.get("name"),
+            "kind": tags.get("waterway"),
+            "coords": coords,
+        })
+    return rivers
+
+
+@st.cache_data(show_spinner="Loading rivers...")
+def _cached_river_paths(signature):
+    # `signature` = ((path, mtime), ...) so editing the file busts the cache.
+    for path, _mtime in signature:
+        rivers = _parse_river_data(_read_json_file(path))
+        if not rivers:
+            raise RuntimeError(
+                f"{os.path.basename(path)} was found but has no usable river "
+                "geometry (need LineString / MultiLineString / Polygon with "
+                "lon/lat coordinates)."
+            )
+        return tuple(rivers)
+
+    if not RIVER_ALLOW_OSM_FALLBACK:
+        raise FileNotFoundError(
+            "no local river file found. Looked for: " + ", ".join(RIVER_DATA_FILES)
+        )
+    raw = _fetch_rivers_from_overpass()
+    rivers = _parse_river_data(raw)
+    if not rivers:
+        raise RuntimeError("no named rivers returned for the Kathmandu Valley area")
+    try:
+        os.makedirs(os.path.dirname(RIVER_CACHE_FILE), exist_ok=True)
+        with open(RIVER_CACHE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(raw, fh)
+    except OSError:
+        pass  # cache file is a convenience only
+    return tuple(rivers)
+
+
+def load_river_paths():
+    """Returns (rivers, error_message). rivers = ((name, kind, pts), ...)"""
+    try:
+        return _cached_river_paths(_file_signature(RIVER_DATA_FILES)), ""
+    except Exception as exc:  # missing file, bad file, ...
+        return (), f"{type(exc).__name__}: {exc}"
+
+
+def river_unavailable_message(error_message=""):
+    return (
+        "River data could not be loaded"
+        + (f" ({error_message})" if error_message else "")
+        + ". Put `kathmandu_river.geojson` in the `data` folder next to the app."
+    )
+
+
+# ---------------------------------------------------------
+# Transit Map (Plotly): rivers in lon/lat data coordinates
+# ---------------------------------------------------------
+def add_rivers_to_transit_figure(fig, lon_range, lat_range):
+    """Draw rivers UNDER the route lines. Only the part of each river
+    inside the visible lon/lat window is sent to the browser."""
+    rivers, _error = load_river_paths()
+    if not rivers:
+        return 0
+
+    lon_lo, lon_hi = lon_range
+    lat_lo, lat_hi = lat_range
+
+    def inside(p):
+        return lon_lo <= p[0] <= lon_hi and lat_lo <= p[1] <= lat_hi
+
+    grouped = {}
+    for name, kind, pts in rivers:
+        flags = [inside(p) for p in pts]
+        last = len(pts) - 1
+        run = []
+        for i, p in enumerate(pts):
+            # keep one point of overshoot so the line reaches the edge
+            keep = flags[i] or (i > 0 and flags[i - 1]) or (i < last and flags[i + 1])
+            if keep:
+                run.append(p)
+            elif run:
+                grouped.setdefault((name, kind), []).extend(run + [(None, None)])
+                run = []
+        if run:
+            grouped.setdefault((name, kind), []).extend(run + [(None, None)])
+
+    n_before = len(fig.data)
+    for (name, kind), pts in grouped.items():
+        fig.add_trace(go.Scatter(
+            x=[p[0] for p in pts],
+            y=[p[1] for p in pts],
+            mode="lines",
+            line=dict(color=RIVER_COLOR, width=8 if kind == "river" else 4.5),
+            connectgaps=False,
+            hoverinfo="text",
+            hovertext=name,
+            showlegend=False,
+            uid=f"river-{kind}-{name}",
+        ))
+    added = len(fig.data) - n_before
+    if added:
+        # Plotly paints traces in order: move the rivers to the back.
+        fig.data = fig.data[n_before:] + fig.data[:n_before]
+    return added
+
+
+def add_roads_to_transit_figure(fig, lon_range, lat_range):
+    """Draw the road network as a cartographic two-layer road casing.
+
+    The same geographic road coordinates are used for both layers:
+
+        1. wide medium-grey outer casing
+        2. narrower light-grey inner road surface
+
+    The complete road group is moved behind the existing Plotly traces, so
+    the transit routes remain centered visually on top of the road surface.
+    No road geometry is shifted or modified.
+    """
+    roads, _error = load_road_paths()
+    if not roads:
+        return 0
+
+    lon_lo, lon_hi = lon_range
+    lat_lo, lat_hi = lat_range
+
+    def inside(p):
+        return lon_lo <= p[0] <= lon_hi and lat_lo <= p[1] <= lat_hi
+
+    # Keep each clipped road as its own polyline, preserving the existing
+    # data structure and preventing lines outside the map window from
+    # affecting the Plotly extent.
+    grouped = {}
+    for name, hierarchy, pts in roads:
+        flags = [inside(p) for p in pts]
+        last = len(pts) - 1
+        run = []
+
+        for i, p in enumerate(pts):
+            # Keep one point of overshoot at the map boundary so the road
+            # reaches the visible edge cleanly.
+            keep = (
+                flags[i]
+                or (i > 0 and flags[i - 1])
+                or (i < last and flags[i + 1])
+            )
+
+            if keep:
+                run.append(p)
+            elif run:
+                grouped.setdefault((name, hierarchy), []).extend(
+                    run + [(None, None)]
+                )
+                run = []
+
+        if run:
+            grouped.setdefault((name, hierarchy), []).extend(
+                run + [(None, None)]
+            )
+
+    n_before = len(fig.data)
+
+    # Width scales with how many other roads pass through the same
+    # corridor, so busier shared corridors are drawn wider.
+    # IMPORTANT: keyed by road NAME only (same as build_road_svg_markup
+    # for the LOOM map). Keying by (name, hierarchy) gives overlapping
+    # segments of one corridor different widths -- the wider surface then
+    # bites into the narrower road's casing and the corridor renders with
+    # stepped/notched edges.
+    share_counts = _road_corridor_counts(list(roads))
+    count_by_name = {}
+    for (name, hierarchy, pts), count in zip(roads, share_counts):
+        count_by_name.setdefault(name, count)
+
+    # ------------------------------------------------------------
+    # LAYER 1: OUTER ROAD CASING
+    # ------------------------------------------------------------
+    for (name, hierarchy), pts in sorted(
+            grouped.items(),
+            key=lambda kv: ROAD_DRAW_ORDER.get(kv[0][1], 0)):
+        base = ROAD_CASING_WIDTH.get(hierarchy, ROAD_CASING_WIDTH["other"])
+        width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
+        fig.add_trace(go.Scatter(
+            x=[p[0] for p in pts],
+            y=[p[1] for p in pts],
+            mode="lines",
+            line=dict(
+                color=ROAD_CASING_COLORS.get(hierarchy, ROAD_CASING_COLOR),
+                width=width,
+            ),
+            connectgaps=False,
+            hoverinfo="text",
+            hovertext=name,
+            showlegend=False,
+            uid=f"road-casing-{hierarchy}-{name}",
+        ))
+
+    # ------------------------------------------------------------
+    # LAYER 2: LIGHTER INNER ROAD SURFACE
+    # ------------------------------------------------------------
+    for (name, hierarchy), pts in sorted(
+            grouped.items(),
+            key=lambda kv: ROAD_DRAW_ORDER.get(kv[0][1], 0)):
+        base = ROAD_SURFACE_WIDTH.get(hierarchy, ROAD_SURFACE_WIDTH["other"])
+        width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
+        fig.add_trace(go.Scatter(
+            x=[p[0] for p in pts],
+            y=[p[1] for p in pts],
+            mode="lines",
+            line=dict(
+                color=ROAD_SURFACE_COLORS.get(hierarchy, ROAD_SURFACE_COLOR),
+                width=width,
+            ),
+            connectgaps=False,
+            hoverinfo="text",
+            hovertext=name,
+            showlegend=False,
+            uid=f"road-surface-{hierarchy}-{name}",
+        ))
+
+    # ------------------------------------------------------------
+    # LAYER 3: ROAD NAME LABELS (one label per unique road name)
+    # ------------------------------------------------------------
+    # The GeoJSON often contains many separate features sharing one road
+    # name (that's why e.g. "Tripureshwor" used to appear several times),
+    # so candidates are deduped by name and only the LONGEST run of each
+    # name is kept, labelled once at its midpoint.
+    #
+    # Labels are also ranked by run length into zoom levels (0 = most
+    # important). Only level-0 labels are visible at the initial view;
+    # the injected JS in display_transit_map reveals higher levels as the
+    # user zooms in.
+    base_span = max(lon_hi - lon_lo, 1e-9)
+    best_by_name = {}
+    for (name, hierarchy), pts in grouped.items():
+        key = str(name).strip().casefold()
+        if not key or key == "road":
+            continue  # unnamed roads: don't label the placeholder
+        runs, run = [], []
+        for p in pts:
+            if p[0] is None:
+                if len(run) >= 2:
+                    runs.append(run)
+                run = []
+            else:
+                run.append(p)
+        if len(run) >= 2:
+            runs.append(run)
+        for r in runs:
+            length = sum(
+                math.hypot(b[0] - a[0], b[1] - a[1])
+                for a, b in zip(r, r[1:])
+            )
+            if key not in best_by_name or length > best_by_name[key][0]:
+                mid = r[len(r) // 2]
+                best_by_name[key] = (length, mid[0], mid[1], str(name))
+
+    level_traces = {}
+    for key, (length, x, y, label) in best_by_name.items():
+        if length >= 0.20 * base_span:
+            level = 0
+        elif length >= 0.06 * base_span:
+            level = 1
+        elif length >= 0.02 * base_span:
+            level = 2
+        else:
+            level = 3
+        level_traces.setdefault(level, []).append((x, y, label))
+
+    for level in sorted(level_traces):
+        pts = level_traces[level]
+        fig.add_trace(go.Scatter(
+            x=[p[0] for p in pts],
+            y=[p[1] for p in pts],
+            mode="text",
+            text=[p[2] for p in pts],
+            textfont=dict(size=9, color="#6b7280", family="Arial, sans-serif"),
+            textposition="middle center",
+            hoverinfo="skip",
+            showlegend=False,
+            uid=f"road-labels-l{level}",
+            visible=(level == 0),
+        ))
+
+    if level_traces:
+        # Base x-span, used by the JS zoom filter in display_transit_map.
+        fig.update_layout(meta=dict(
+            fig.layout.meta or {}, roadLabelSpan=base_span))
+
+    added = len(fig.data) - n_before
+    if added:
+        # Plotly paints traces in order. Move all road layers behind the
+        # routes, stop markers, labels and landmarks that already exist.
+        road_traces = list(fig.data[n_before:])
+        existing_traces = list(fig.data[:n_before])
+        fig.data = tuple(road_traces + existing_traces)
+
+    return added
+
+
+# ---------------------------------------------------------
+# LOOM Map (SVG): geographic layout only
+# ---------------------------------------------------------
+def _fit_geo_to_svg(route_stops, svg_labels, markers, canvas_size):
+    """Fit lon/lat -> SVG x/y using the stops LOOM actually drew.
+
+    Matches each real stop to its rendered marker (by station-label name),
+    then solves one global similarity transform (scale + rotation + shift)
+    by complex least squares, discarding mismatched stops. Returns a
+    function (lon, lat) -> (x, y), or None when the fit isn't trustworthy
+    (too few matches, big residuals, or a layout that isn't north-up --
+    e.g. a schematic map)."""
+    import cmath
+    import statistics
+
+    if not route_stops or not svg_labels:
+        return None
+
+    label_by_name = {}
+    for label in svg_labels:
+        key = _normalize_stop_name_for_match(label.get("text", ""))
+        if key and key not in label_by_name:
+            label_by_name[key] = label
+
+    lon0 = sum(float(s["lon"]) for s in route_stops) / len(route_stops)
+    lat0 = sum(float(s["lat"]) for s in route_stops) / len(route_stops)
+    coslat = math.cos(math.radians(lat0))
+
+    pairs, seen = [], set()
+    for stop in route_stops:
+        key = _normalize_stop_name_for_match(stop.get("name", ""))
+        if not key or key in seen or key not in label_by_name:
+            continue
+        try:
+            sx, sy = _snap_label_to_marker(label_by_name[key], markers or [])
+            g = complex((float(stop["lon"]) - lon0) * coslat, float(stop["lat"]) - lat0)
+            s = complex(float(sx), -float(sy))
+        except (TypeError, ValueError, KeyError):
+            continue
+        seen.add(key)
+        pairs.append((g, s))
+    if len(pairs) < 3:
+        return None
+
+    def solve(idx):
+        n = len(idx)
+        gbar = sum(pairs[i][0] for i in idx) / n
+        sbar = sum(pairs[i][1] for i in idx) / n
+        den = sum(abs(pairs[i][0] - gbar) ** 2 for i in idx)
+        if den < 1e-18:
+            return None
+        a = sum((pairs[i][0] - gbar).conjugate() * (pairs[i][1] - sbar) for i in idx) / den
+        return a, sbar - a * gbar
+
+    idx = list(range(len(pairs)))
+    a = t = None
+    for _ in range(4):
+        sol = solve(idx)
+        if sol is None:
+            return None
+        a, t = sol
+        resid = [abs(a * g + t - s) for g, s in pairs]
+        cutoff = max(3.0 * statistics.median(resid), abs(a) * 0.0005)
+        new_idx = [i for i, r in enumerate(resid) if r <= cutoff]
+        if len(new_idx) < 3:
+            return None
+        if new_idx == idx:
+            break
+        idx = new_idx
+
+    kept_resid = [abs(a * pairs[i][0] + t - pairs[i][1]) for i in idx]
+    if len(idx) < max(3, 0.4 * len(pairs)):
+        return None
+    if statistics.median(kept_resid) > 0.04 * max(canvas_size, 1.0):
+        return None
+    if abs(cmath.phase(a)) > 0.35:  # >20 degrees: not a north-up geographic map
+        return None
+
+    def to_xy(lon, lat):
+        p = a * complex((lon - lon0) * coslat, lat - lat0) + t
+        return p.real, -p.imag
+
+    return to_xy
+
+
+def _clip_segment_to_box(x0, y0, x1, y1, box):
+    """Liang-Barsky segment clipping. Returns (x0, y0, x1, y1) or None."""
+    xmin, ymin, xmax, ymax = box
+    dx, dy = x1 - x0, y1 - y0
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, x0 - xmin), (dx, xmax - x0), (-dy, y0 - ymin), (dy, ymax - y0)):
+        if p == 0:
+            if q < 0:
+                return None
+            continue
+        r = q / p
+        if p < 0:
+            if r > t1:
+                return None
+            t0 = max(t0, r)
+        else:
+            if r < t0:
+                return None
+            t1 = min(t1, r)
+    return x0 + t0 * dx, y0 + t0 * dy, x0 + t1 * dx, y0 + t1 * dy
+
+
+def _clip_polyline_to_box(points, box):
+    runs, run = [], []
+    for (ax, ay), (bx, by) in zip(points, points[1:]):
+        seg = _clip_segment_to_box(ax, ay, bx, by, box)
+        if seg is None:
+            if run:
+                runs.append(run)
+            run = []
+            continue
+        sx, sy, ex, ey = seg
+        if run and math.hypot(run[-1][0] - sx, run[-1][1] - sy) < 1e-6:
+            run.append((ex, ey))
+        else:
+            if run:
+                runs.append(run)
+            run = [(sx, sy), (ex, ey)]
+    if run:
+        runs.append(run)
+    return runs
+
+
+def _svg_path_d(run):
+    return "M " + " L ".join(f"{x:.1f} {y:.1f}" for x, y in run)
+
+
+def build_road_svg_markup(svg, route_stops, roads, line_width=40):
+    """SVG markup for the road layer, or "" when it can't be placed
+    reliably. Same mechanism as build_river_svg_markup(): roads are
+    geographic, so they are only drawable on the non-schematic layout,
+    fitted against the SVG exactly as LOOM drew it. Roads are drawn as
+    thin warm-grey lines that read as background geography, clearly
+    secondary to the route lines."""
+    vb = _svg_viewbox(svg)
+    if vb is None or not route_stops or not roads:
+        return ""
+    vx, vy, vw, vh = vb
+
+    to_xy = _fit_geo_to_svg(
+        route_stops, get_svg_label_texts(svg), _extract_svg_station_markers(svg),
+        max(vw, vh),
+    )
+    if to_xy is None:
+        return ""
+
+    markers = _extract_svg_station_markers(svg)
+    segments = _extract_svg_polyline_segments(svg)
+    xs = [m[0] for m in markers] + [s[0] for s in segments] + [s[2] for s in segments]
+    ys = [m[1] for m in markers] + [s[1] for s in segments] + [s[3] for s in segments]
+    if xs and ys:
+        margin = 0.2 * max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+        box = (
+            max(vx, min(xs) - margin), max(vy, min(ys) - margin),
+            min(vx + vw, max(xs) + margin), min(vy + vh, max(ys) + margin),
+        )
+    else:
+        box = (vx, vy, vx + vw, vy + vh)
+
+    # EXACTLY the same cartographic road style as the Plotly transit map:
+    # a wide grey casing under a narrower light-grey surface, with the
+    # same fixed pixel widths per road hierarchy (see ROAD_CASING_WIDTH /
+    # ROAD_SURFACE_WIDTH above). Plotly strokes are screen pixels and the
+    # LOOM SVG is displayed at 1 SVG unit = 1 px, so the values transfer
+    # directly -- the LOOM roads now have identical visual weight to the
+    # Plotly ones instead of the old thin line_width-derived widths.
+    casing_width = ROAD_CASING_WIDTH
+    surface_width = ROAD_SURFACE_WIDTH
+
+    share_counts = _road_corridor_counts(roads)
+    count_by_name = {}
+    for (name, hierarchy, pts), count in zip(roads, share_counts):
+        count_by_name.setdefault(name, count)
+
+    body = []
+    # Road name tooltip: shown on hover via a <title> child of each path
+    # (native browser/SVG tooltip), so the name is available without
+    # cluttering the map with permanent labels.
+    def _escape_title(text):
+        return (str(text).replace("&", "&amp;")
+                .replace("<", "&lt;").replace(">", "&gt;"))
+
+    escaped = None
+    # Layer 1: outer casing (same color/width as Plotly's casing layer),
+    # widened by how many other roads pass through the same corridor.
+    for name, hierarchy, pts in sorted(
+            roads, key=lambda r: ROAD_DRAW_ORDER.get(r[1], 0)):
+        escaped = _escape_title(name)
+        xy = [to_xy(lon, lat) for lon, lat in pts]
+        base = casing_width.get(hierarchy, casing_width["other"])
+        width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
+        for run in _clip_polyline_to_box(xy, box):
+            body.append(
+                f'<path d="{_svg_path_d(run)}" fill="none" stroke="{ROAD_CASING_COLORS.get(hierarchy, ROAD_CASING_COLOR)}" '
+                f'stroke-width="{width:.1f}" stroke-linecap="round" '
+                f'stroke-linejoin="round">'
+                f'<title>{escaped}</title></path>'
+            )
+    # Layer 2: inner surface (same color/width as Plotly's surface layer),
+    # widened by how many other roads pass through the same corridor.
+    for name, hierarchy, pts in sorted(
+            roads, key=lambda r: ROAD_DRAW_ORDER.get(r[1], 0)):
+        escaped = _escape_title(name)
+        xy = [to_xy(lon, lat) for lon, lat in pts]
+        base = surface_width.get(hierarchy, surface_width["other"])
+        width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
+        for run in _clip_polyline_to_box(xy, box):
+            body.append(
+                f'<path d="{_svg_path_d(run)}" fill="none" stroke="{ROAD_SURFACE_COLORS.get(hierarchy, ROAD_SURFACE_COLOR)}" '
+                f'stroke-width="{width:.1f}" stroke-linecap="round" '
+                f'stroke-linejoin="round">'
+                f'<title>{escaped}</title></path>'
+            )
+    if not body:
+        return ""
+
+    return (
+        '\n<!-- Road layer -->\n<g class="loom-road" pointer-events="visiblePainted">'
+        + "".join(body)
+        + '</g>\n<!-- End road layer -->\n'
+    )
+
+
+def build_river_svg_markup(svg, route_stops, rivers, line_width=40):
+    """SVG markup for the river layer, or "" when it can't be placed
+    reliably. Call BEFORE landmarks are added (so landmark labels can't be
+    mistaken for station labels) and insert the result with
+    insert_river_markup() AFTER the label passes."""
+    vb = _svg_viewbox(svg)
+    if vb is None or not route_stops or not rivers:
+        return ""
+    vx, vy, vw, vh = vb
+
+    to_xy = _fit_geo_to_svg(
+        route_stops, get_svg_label_texts(svg), _extract_svg_station_markers(svg),
+        max(vw, vh),
+    )
+    if to_xy is None:
+        return ""
+
+    # Keep the river inside (drawn map extent + margin) so it doesn't
+    # stretch the canvas or the exported PNG.
+    markers = _extract_svg_station_markers(svg)
+    segments = _extract_svg_polyline_segments(svg)
+    xs = [m[0] for m in markers] + [s[0] for s in segments] + [s[2] for s in segments]
+    ys = [m[1] for m in markers] + [s[1] for s in segments] + [s[3] for s in segments]
+    if xs and ys:
+        margin = 0.2 * max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+        box = (
+            max(vx, min(xs) - margin), max(vy, min(ys) - margin),
+            min(vx + vw, max(xs) + margin), min(vy + vh, max(ys) + margin),
+        )
+    else:
+        box = (vx, vy, vx + vw, vy + vh)
+
+    # Wider strokes so rivers read as real water bodies instead of thin
+    # background lines (streams stay proportionally thinner).
+    river_w = max(float(line_width) * 0.25, 4.0)
+    stream_w = max(float(line_width) * 0.12, 2.0)
+
+    body, longest = [], {}
+    for name, kind, pts in rivers:
+        xy = [to_xy(lon, lat) for lon, lat in pts]
+        for run in _clip_polyline_to_box(xy, box):
+            width = river_w if kind == "river" else stream_w
+            body.append(
+                f'<path d="{_svg_path_d(run)}" fill="none" stroke="{RIVER_COLOR}" '
+                f'stroke-width="{width:.1f}" stroke-linecap="round" '
+                f'stroke-linejoin="round"/>'
+            )
+            if kind == "river":
+                length = sum(
+                    math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(run, run[1:])
+                )
+                if name not in longest or length > longest[name][0]:
+                    longest[name] = (length, run)
+    if not body:
+        return ""
+
+    # River names along the waterways were deliberately removed: they added
+    # clutter on the map and the user asked for them to be dropped.
+
+    return (
+        '\n<!-- River layer -->\n<g class="loom-river" pointer-events="none">'
+        + "".join(body)
+        + '</g>\n<!-- End river layer -->\n'
+    )
+
+
+def insert_river_markup(svg, markup):
+    """Insert as the FIRST drawn content so rivers sit under route lines."""
+    if not markup:
+        return svg
+    match = re.search(r"<svg\b[^>]*>", svg, flags=re.IGNORECASE)
+    if not match:
+        return svg
+    return svg[:match.end()] + "\n" + markup + svg[match.end():]
+
+
+# ------------------------------------------------------------
+# CUSTOM SVG ICONS FOR LANDMARKS
+# ------------------------------------------------------------
+
+def get_landmark_custom_svg_status(record):
+    """Resolve a landmark's custom SVG and report exactly what happened.
+
+    Returns a dict:
+        {"ok": bool, "reason": str, "path": str|None, "svg": str|None}
+
+    "reason" is a short human-readable explanation, always filled in, even
+    on success -- this is what get_landmark_custom_svg() used to swallow,
+    making silent fallback-to-generic-icon impossible to debug.
+    """
+    svg_value = record.get("svg")
+    name = record.get("name", "?")
+
+    if not svg_value:
+        return {"ok": False, "reason": "No \"svg\" key set for this landmark.",
+                "path": None, "svg": None}
+
+    svg_text = str(svg_value).strip()
+    resolved_path = None
+
+    if "<svg" not in svg_text.lower():
+        # Treat as a file path relative to this script's own folder.
+        resolved_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), svg_value
+        )
+        if not os.path.isfile(resolved_path):
+            return {
+                "ok": False,
+                "reason": (
+                    f'File not found: "{resolved_path}". The "svg" value '
+                    f'"{svg_value}" is resolved relative to app.py\'s own '
+                    f"folder -- check the icons/ folder actually ships "
+                    f"next to app.py in this environment."
+                ),
+                "path": resolved_path, "svg": None,
+            }
+        try:
+            with open(resolved_path, "r", encoding="utf-8") as f:
+                svg_text = f.read()
+        except OSError as exc:
+            return {"ok": False, "reason": f"Could not read file: {exc}",
+                     "path": resolved_path, "svg": None}
+
+    if "<svg" not in svg_text.lower():
+        return {
+            "ok": False,
+            "reason": (
+                "Resolved content has no <svg> tag -- the file/string isn't "
+                "actually SVG markup (empty file, HTML error page, wrong "
+                "path pointing at something else, etc.)."
+            ),
+            "path": resolved_path, "svg": None,
+        }
+
+    cleaned = sanitize_uploaded_svg(svg_text)
+    return {"ok": True, "reason": f"Loaded OK ({len(cleaned)} chars).",
+            "path": resolved_path, "svg": cleaned}
+
+
+def get_landmark_custom_svg(record):
+    return get_landmark_custom_svg_status(record)["svg"]
+
+
+def landmark_svg_data_uri(svg_text):
+    encoded = base64.b64encode(svg_text.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
+LANDMARK_ICON_GREY = "#6b7280"  # grey-500: secondary, non-black icon colour
+
+
+def landmark_grey_tint(svg_text):
+    """Recolour a landmark SVG from black to a muted grey so icons read as
+    secondary map furniture instead of fighting with the route lines.
+
+    Figma/icon exports use a variety of black spellings (#000, #000000,
+    'black', 'rgb(0,0,0)') on either fill or stroke -- all are mapped to the
+    same grey. Non-black fills/strokes are left untouched.
+    """
+    text = str(svg_text)
+    for attr in ("fill", "stroke"):
+        text = re.sub(
+            rf'{attr}\s*=\s*"(?:#000(?:000)?|black|rgb\(0\s*,\s*0\s*,\s*0\))"',
+            f'{attr}="{LANDMARK_ICON_GREY}"',
+            text, flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            rf"{attr}\s*=\s*'(?:#000(?:000)?|black|rgb\(0\s*,\s*0\s*,\s*0\))'",
+            f"{attr}='{LANDMARK_ICON_GREY}'",
+            text, flags=re.IGNORECASE,
+        )
+    return text
+
+
+def sanitize_uploaded_svg(svg_text):
+    text = str(svg_text)
+    text = re.sub(r"<script\b[\s\S]*?</script>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\son\w+\s*=\s*\"[^\"]*\"", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\son\w+\s*=\s*'[^']*'", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(href|xlink:href)\s*=\s*\"(?!#)[^\"]*\"", "", text, flags=re.IGNORECASE)
+    return text
+
+
+def uploaded_svg_viewbox(svg_text):
+    match = re.search(
+        r'\bviewBox\s*=\s*["\']\s*([\d.eE+-]+)\s+([\d.eE+-]+)\s+'
+        r'([\d.eE+-]+)\s+([\d.eE+-]+)\s*["\']',
+        svg_text,
+    )
+    if match:
+        return tuple(float(v) for v in match.groups())
+    # Fall back to width/height if the icon has no viewBox.
+    wm = re.search(r'\bwidth\s*=\s*["\']([\d.]+)', svg_text)
+    hm = re.search(r'\bheight\s*=\s*["\']([\d.]+)', svg_text)
+    if wm and hm:
+        return 0.0, 0.0, float(wm.group(1)), float(hm.group(1))
+    return None
+
+
+def _svg_landmark_group(record, x, y, size=28):
+    name = html.escape(str(record["name"]))
+    s = float(size)
+    hx = s * 0.5
+    hy = s * 0.5
+
+    custom_svg = get_landmark_custom_svg(record)
+    if custom_svg:
+        vb = uploaded_svg_viewbox(custom_svg)
+        vb_attr = (
+            f'viewBox="{vb[0]:.3f} {vb[1]:.3f} {vb[2]:.3f} {vb[3]:.3f}"'
+            if vb else 'viewBox="0 0 100 100"'
+        )
+
+        m_root = re.search(r"<svg\b([^>]*)>([\s\S]*)</\s*svg\s*>", custom_svg, re.IGNORECASE)
+        root_attrs, inner = (m_root.group(1), m_root.group(2)) if m_root else ("", custom_svg)
+
+        # Keep inheritable presentation attrs from the icon's own root <svg>
+        # (e.g. fill="none" on Figma exports -- dropping it turned stroke-only
+        # paths into solid black blobs). Drop only layout attrs we override.
+        root_attrs = re.sub(
+            r'\s(?:x|y|width|height|viewBox|preserveAspectRatio|version|xmlns(?::\w+)?)'
+            r'\s*=\s*("[^"]*"|\'[^\']*\')',
+            "", root_attrs, flags=re.IGNORECASE)
+
+        # Namespace ids so filters/masks/gradients from different icons
+        # can't collide inside the shared map document.
+        uid = "lm" + hashlib.md5(str(record["name"]).encode("utf-8")).hexdigest()[:6]
+        # Grey-tint black icons so landmarks stay visually secondary.
+        inner = landmark_grey_tint(inner)
+        inner = re.sub(r'\bid="([^"]+)"', lambda mm: f'id="{uid}-{mm.group(1)}"', inner)
+        inner = re.sub(r'url\(#([^)]+)\)', lambda mm: f'url(#{uid}-{mm.group(1)})', inner)
+        inner = re.sub(r'(xlink:href|href)="#([^"]+)"',
+                       lambda mm: f'{mm.group(1)}="#{uid}-{mm.group(2)}"', inner)
+
+        shapes = (
+            f'<svg x="{x-hx:.3f}" y="{y-hy:.3f}" width="{s:.3f}" height="{s:.3f}" '
+            f'{vb_attr} preserveAspectRatio="xMidYMid meet"{root_attrs}>{inner}</svg>'
+        )
+    else:
+        kind = record.get("kind", "monument")
+        shapes = _builtin_landmark_shapes(record, x, y, size)
+
+    return f"""
+      <g class="loom-landmark" data-landmark="{name}" data-landmark-name="{name}"
+         data-x="{x:.3f}" data-y="{y:.3f}" data-size="{s:.3f}" tabindex="0" style="cursor:pointer">
+        {shapes}
+        <text class="landmark-label" x="{x+hx*0.95:.3f}" y="{y-hy*0.95:.3f}"
+              visibility="hidden"
+              font-family="Arial, sans-serif" font-size="{max(7,s*0.42):.2f}"
+              font-weight="600" fill="#111111"
+              stroke="white" stroke-width="{max(1,s*0.09):.2f}"
+              paint-order="stroke" stroke-linejoin="round">{name}</text>
+      </g>
+    """
+
+
+def _builtin_landmark_shapes(record, x, y, size=28):
+    """Built-in vector landmark icons (used when no custom SVG is uploaded)."""
+    kind = record.get("kind", "monument")
+    s = float(size)
+    hx = s * 0.5
+    hy = s * 0.5
+
+    if kind == "temple":
+        shapes = f"""
+            <polygon points="{x},{y-hy*0.95} {x-hx*0.72},{y-hy*0.05}
+                     {x+hx*0.72},{y-hy*0.05}"
+                     fill="white" stroke="#7c3aed" stroke-width="{s*0.07:.2f}"/>
+            <rect x="{x-hx*0.42}" y="{y-hy*0.02}"
+                  width="{hx*0.84}" height="{hy*0.78}"
+                  fill="white" stroke="#7c3aed" stroke-width="{s*0.07:.2f}"/>
+            <rect x="{x-hx*0.12}" y="{y+hy*0.18}"
+                  width="{hx*0.24}" height="{hy*0.58}"
+                  fill="white" stroke="#7c3aed" stroke-width="{s*0.06:.2f}"/>
+        """
+    elif kind == "tower":
+        shapes = f"""
+            <polygon points="{x-hx*0.32},{y+hy*0.9}
+                     {x+hx*0.32},{y+hy*0.9}
+                     {x+hx*0.22},{y-hy*0.25}
+                     {x-hx*0.22},{y-hy*0.25}"
+                     fill="white" stroke="#dc2626" stroke-width="{s*0.07:.2f}"/>
+            <rect x="{x-hx*0.36}" y="{y-hy*0.40}"
+                  width="{hx*0.72}" height="{hy*0.18}"
+                  fill="white" stroke="#dc2626" stroke-width="{s*0.06:.2f}"/>
+            <polygon points="{x},{y-hy*0.95}
+                     {x-hx*0.35},{y-hy*0.42}
+                     {x+hx*0.35},{y-hy*0.42}"
+                     fill="white" stroke="#dc2626" stroke-width="{s*0.07:.2f}"/>
+        """
+    elif kind == "stupa":
+        shapes = f"""
+            <circle cx="{x}" cy="{y-hy*0.18}" r="{hx*0.50}"
+                    fill="white" stroke="#ea580c" stroke-width="{s*0.07:.2f}"/>
+            <path d="M {x-hx*0.72},{y+hy*0.55}
+                     Q {x},{y+hy*0.02} {x+hx*0.72},{y+hy*0.55}
+                     L {x+hx*0.55},{y+hy*0.78}
+                     L {x-hx*0.55},{y+hy*0.78} Z"
+                  fill="white" stroke="#ea580c" stroke-width="{s*0.07:.2f}"/>
+            <line x1="{x}" y1="{y-hy*0.70}" x2="{x}" y2="{y-hy*0.98}"
+                  stroke="#ea580c" stroke-width="{s*0.07:.2f}"/>
+        """
+    elif kind == "park":
+        shapes = f"""
+            <circle cx="{x}" cy="{y}" r="{hx*0.78}"
+                    fill="white" stroke="#16a34a" stroke-width="{s*0.07:.2f}"/>
+            <path d="M {x},{y+hy*0.52} L {x},{y-hy*0.28}
+                     M {x},{y-hy*0.10} L {x-hx*0.35},{y-hy*0.38}
+                     M {x},{y+hy*0.08} L {x+hx*0.34},{y-hy*0.18}"
+                  fill="none" stroke="#16a34a" stroke-width="{s*0.07:.2f}"
+                  stroke-linecap="round"/>
+        """
+    else:
+        shapes = f"""
+            <rect x="{x-hx*0.65}" y="{y-hy*0.65}"
+                  width="{s*0.65}" height="{s*0.65}" rx="{s*0.10:.2f}"
+                  transform="rotate(45 {x} {y})"
+                  fill="white" stroke="#1d4ed8" stroke-width="{s*0.07:.2f}"/>
+            <circle cx="{x}" cy="{y}" r="{hx*0.20}" fill="#1d4ed8"/>
+        """
+    return shapes
+
+
+def _svg_viewbox(svg):
+    match = re.search(
+        r'\bviewBox\s*=\s*["\']\s*([-\d.eE+]+)\s+([-\d.eE+]+)\s+'
+        r'([-\d.eE+]+)\s+([-\d.eE+]+)\s*["\']',
+        svg,
+    )
+    return tuple(float(v) for v in match.groups()) if match else None
+
+
+def _normalize_stop_name_for_match(name):
+    """Normalize a stop name so a real GTFS stop can be matched against its
+    rendered LOOM station-label text, which may carry a trailing sequence
+    number LOOM/the GTFS feed appends to disambiguate repeated stop names
+    (e.g. the label "Kalanki Bus Stop1" for the GTFS stop "Kalanki Bus
+    Stop"). Mirrors the normalization is_major_transit_stop() already uses
+    elsewhere in the app for the same reason."""
+    s = _collapse_repeated_text(str(name or "").strip().casefold())
+    s = re.sub(r"[\s_-]*\d+\s*$", "", s)
+    return _collapse_repeated_text(s)
+
+
+def _collapse_repeated_text(s):
+    """LOOM sometimes renders a label's text twice back to back
+    ("Gopi Krishna Bus StopGopi Krishna Bus Stop"). Collapse that to one copy."""
+    n = len(s)
+    if n >= 6 and n % 2 == 0 and s[:n // 2] == s[n // 2:]:
+        return s[:n // 2]
+    if n >= 7 and n % 2 == 1 and s[n // 2] in " _-" and s[:n // 2] == s[n // 2 + 1:]:
+        return s[:n // 2]
+    return s
+
+
+def _extract_svg_polyline_segments(svg):
+    """Pull every visibly-stroked <path>'s polyline segments out of a LOOM
+    SVG, in the SVG's own coordinate space. Used to keep landmark icons
+    clear of the actual rendered transit lines -- which, in schematic
+    (octilinear) mode, follow a distorted grid layout rather than a simple
+    function of real-world lon/lat, so this has to read the real drawn
+    geometry rather than recompute it."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return []
+
+    def tag_local(el):
+        return el.tag.split('}')[-1] if '}' in el.tag else el.tag
+
+    segments = []
+    for el in root.iter():
+        if tag_local(el) != 'path':
+            continue
+        # A path counts as a drawn line if it has a visible stroke via
+        # attribute OR inline style. LOOM sometimes carries stroke only in
+        # style="...stroke:#xxxxxx..." or via a CSS class (e.g. on the
+        # <g> wrapper), so checking only the attribute silently missed real
+        # route lines -- which is why landmark icons could still land on
+        # them. Paths with no stroke indication at all are still skipped so
+        # invisible hit-areas / label paths don't create fake obstacles.
+        stroke = (el.get('stroke') or '').strip().lower()
+        style = (el.get('style') or '').lower()
+        style_stroke = re.search(r'stroke\s*:\s*([^;]+)', style)
+        if style_stroke:
+            stroke = style_stroke.group(1).strip().lower()
+        cls = (el.get('class') or '').lower()
+        has_stroke_attr = stroke not in ('', 'none')
+        styled_line = has_stroke_attr or 'transitline' in cls or 'line' in cls
+        if not styled_line:
+            continue
+        stroke_width = el.get('stroke-width')
+        if not stroke_width:
+            m_w = re.search(r'stroke-width\s*:\s*([\d.]+)', style)
+            stroke_width = m_w.group(1) if m_w else None
+        try:
+            if stroke_width is not None and float(stroke_width) <= 0:
+                continue
+        except ValueError:
+            pass
+        d = el.get('d') or ''
+        coords = re.findall(r'([A-Za-z])\s*(-?[\d.eE+]+)[\s,]+(-?[\d.eE+]+)', d)
+        pts = [(float(a), float(b)) for _, a, b in coords]
+        # Guard against degenerate one-point paths (M-only label paths etc.).
+        if len(pts) < 2:
+            continue
+        for i in range(len(pts) - 1):
+            segments.append((pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]))
+    return segments
+
+
+def _collect_route_stops_with_names(selected_routes):
+    """All (name, lon, lat) stops across the selected routes -- used to
+    find, for a given landmark, the nearest real transit stop, so its
+    rendered LOOM position can be looked up by name."""
+    stops = []
+    for route_id in selected_routes:
+        try:
+            ordered = route_stops_ordered(route_id)
+        except Exception:
+            continue
+        if ordered is None or ordered.empty:
+            continue
+        for _, row in ordered.iterrows():
+            try:
+                lon = float(row["stop_lon"])
+                lat = float(row["stop_lat"])
+            except (TypeError, ValueError):
+                continue
+            name = "" if pd.isna(row.get("stop_name")) else str(row["stop_name"]).strip()
+            if not name:
+                continue
+            stops.append({"name": name, "lon": lon, "lat": lat})
+    return stops
+
+
+def _find_svg_station_anchor(landmark_record, route_stops, svg_labels):
+    """Find where the landmark's nearest real transit stop actually ended
+    up in the rendered LOOM SVG, by matching stop names to station-label
+    text. Returns (x, y) or None if no confident match is found (nothing
+    forces a landmark to a wrong spot when its nearest stop's label can't
+    be located)."""
+    if not route_stops or not svg_labels:
+        return None
+
+    lon, lat = float(landmark_record["lon"]), float(landmark_record["lat"])
+    nearest = min(
+        route_stops,
+        key=lambda s: (s["lon"] - lon) ** 2 + (s["lat"] - lat) ** 2,
+    )
+    target = _normalize_stop_name_for_match(nearest["name"])
+    if not target:
+        return None
+
+    for label in svg_labels:
+        if _normalize_stop_name_for_match(label["text"]) == target:
+            try:
+                return float(label["cx"]), float(label["cy"])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _extract_svg_station_markers(svg):
+    """Centres of the drawn station markers (the actual bus-stop symbols).
+
+    A station *label* is a text path that can be a hundred+ units long, so
+    its centroid can sit far from the stop it names. Anchoring landmarks to
+    the marker itself keeps the icon next to the real stop.
+    """
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return []
+    markers = []
+    for el in root.iter():
+        tag = el.tag.split('}')[-1] if '}' in el.tag else el.tag
+        cls = (el.get('class') or '').lower()
+        if 'station' not in cls or 'label' in cls:
+            continue
+        if tag not in ('path', 'circle', 'ellipse', 'polygon', 'rect'):
+            continue
+        try:
+            if tag in ('circle', 'ellipse'):
+                markers.append((float(el.get('cx')), float(el.get('cy'))))
+                continue
+            if tag == 'rect':
+                x0, y0 = float(el.get('x')), float(el.get('y'))
+                nums = [x0, y0, x0 + float(el.get('width')), y0 + float(el.get('height'))]
+            else:
+                raw = el.get('d') if tag == 'path' else el.get('points')
+                nums = [float(n) for n in re.findall(r'-?\d+\.?\d*(?:[eE][-+]?\d+)?', raw or '')]
+        except (TypeError, ValueError):
+            continue
+        if len(nums) < 4:
+            continue
+        xs, ys = nums[0::2], nums[1::2]
+        markers.append(((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0))
+    return markers
+
+
+def _snap_label_to_marker(label, markers):
+    """Position of the stop a label names: nearest station marker to the
+    label's end points, else the label's start point (text starts next to
+    its stop), else its centroid."""
+    ends = label.get("ends")
+    if not ends:
+        return float(label["cx"]), float(label["cy"])
+    x0, y0, x1, y1 = ends
+    if markers:
+        label_len = math.hypot(x1 - x0, y1 - y0)
+        best = None
+        for mx, my in markers:
+            d = min(math.hypot(mx - x0, my - y0), math.hypot(mx - x1, my - y1))
+            if best is None or d < best[0]:
+                best = (d, mx, my)
+        if best is not None and best[0] <= 0.5 * label_len + 80:
+            return best[1], best[2]
+    return x0, y0
+
+
+def _find_svg_landmark_anchor(landmark_record, route_stops, svg_labels, k=5, markers=None):
+    """Rendered position of the landmark's nearest selected-route stop.
+
+    Uses that single nearest stop (no blending of several stops -- a blend
+    of stops that the octilinear layout has spread apart lands nowhere near
+    any real stop). `k` is kept only for call compatibility.
+    """
+    if not route_stops or not svg_labels:
+        return None
+    label_by_name = {}
+    for label in svg_labels:
+        key = _normalize_stop_name_for_match(label.get("text", ""))
+        if key and key not in label_by_name:
+            label_by_name[key] = label
+    lon, lat = float(landmark_record["lon"]), float(landmark_record["lat"])
+    coslat = math.cos(math.radians(lat))
+    best = None
+    for stop in route_stops:
+        label = label_by_name.get(_normalize_stop_name_for_match(stop.get("name", "")))
+        if label is None:
+            continue
+        try:
+            slon, slat = float(stop["lon"]), float(stop["lat"])
+        except (TypeError, ValueError):
+            continue
+        dx, dy = (slon - lon) * coslat, slat - lat
+        d2 = dx * dx + dy * dy
+        if best is None or d2 < best[0]:
+            best = (d2, label)
+    if best is None:
+        return None
+    try:
+        return _snap_label_to_marker(best[1], markers or [])
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _schematic_landmark_position(record, route_stops, svg_labels, markers, k=5):
+    """Where a landmark belongs on the octilinear map, from its REAL position
+    relative to nearby stops.
+
+    Snapping to the single nearest stop can't express "between Gaushala and
+    Pingalasthan" or "a bit east of Chabahil". Instead, fit a small local
+    similarity transform (scale + rotation + shift, weighted toward the
+    closest stops) from real lon/lat to the drawn stop positions, and map the
+    landmark through it. A landmark that is between two stops therefore lands
+    between them; one that is a bit off to a side lands a bit off to that side.
+
+    Returns ((x, y), (nearest_stop_x, nearest_stop_y)) or None.
+    """
+    if not route_stops or not svg_labels:
+        return None
+    label_by_name = {}
+    for label in svg_labels:
+        key = _normalize_stop_name_for_match(label.get("text", ""))
+        if key and key not in label_by_name:
+            label_by_name[key] = label
+    lon, lat = float(record["lon"]), float(record["lat"])
+    coslat = math.cos(math.radians(lat))
+    pts, seen = [], set()
+    for stop in route_stops:
+        key = _normalize_stop_name_for_match(stop.get("name", ""))
+        if not key or key in seen or key not in label_by_name:
+            continue
+        try:
+            slon, slat = float(stop["lon"]), float(stop["lat"])
+            sx, sy = _snap_label_to_marker(label_by_name[key], markers or [])
+        except (TypeError, ValueError, KeyError):
+            continue
+        seen.add(key)
+        gx, gy = (slon - lon) * coslat, slat - lat
+        pts.append((gx * gx + gy * gy, gx, gy, float(sx), float(sy)))
+    if not pts:
+        return None
+    pts.sort(key=lambda v: v[0])
+    near = pts[:max(2, k)]
+    nearest_xy = (near[0][3], near[0][4])
+    if len(near) < 2:
+        return nearest_xy, nearest_xy
+
+    # Complex weighted least squares:  s = a*g + t  (g = real offset from the
+    # landmark in east/north, s = drawn position with y flipped for screen).
+    d0 = 0.002 ** 2  # ~200 m softening so one very close stop can't dominate
+    ws = [1.0 / (v[0] + d0) for v in near]
+    gs = [complex(v[1], v[2]) for v in near]
+    ss = [complex(v[3], -v[4]) for v in near]
+    wsum = sum(ws)
+    gbar = sum(w * g for w, g in zip(ws, gs)) / wsum
+    sbar = sum(w * t for w, t in zip(ws, ss)) / wsum
+    den = sum(w * abs(g - gbar) ** 2 for w, g in zip(ws, gs))
+    if den < 1e-18:
+        return nearest_xy, nearest_xy
+    a = sum(w * (g - gbar).conjugate() * (t - sbar)
+            for w, g, t in zip(ws, gs, ss)) / den
+    pred = sbar - a * gbar          # landmark is at g = 0
+    return (pred.real, -pred.imag), nearest_xy
+
+
+def _clamp_shift(base_x, base_y, x, y, max_shift):
+    """Clamp (x, y) so its total displacement from (base_x, base_y) never
+    exceeds max_shift. Line-avoidance nudges keep wanting to push icons
+    further and further away on dense maps; but the icon must stay near
+    its real anchor (nearest stop / true coordinate), otherwise the dotted
+    leader line gets so long the icon appears to belong somewhere else.
+    Prefer proximity to the anchor over being perfectly clear of lines:
+    sitting slightly on a line is much less misleading than being far off.
+    """
+    dx, dy = x - base_x, y - base_y
+    dist = math.hypot(dx, dy)
+    if dist <= max_shift or dist == 0:
+        return x, y
+    scale = max_shift / dist
+    return base_x + dx * scale, base_y + dy * scale
+
+
+@st.cache_data
+def _network_stops_for_anchor():
+    """Every stop in the whole network (independent of selected routes), so a
+    landmark's anchor stop never changes when routes are added/removed."""
+    try:
+        return pd.read_sql(
+            "SELECT stop_name, stop_lat, stop_lon FROM stops", get_engine()
+        ).dropna().to_dict("records")
+    except Exception:
+        return []
+
+
+def _fixed_anchor_stop_name(record):
+    """Anchor stop for a landmark: explicit record["anchor"] if given, else the
+    nearest stop in the FULL network (cached, route-selection independent)."""
+    explicit = str(record.get("anchor") or "").strip()
+    if explicit:
+        return explicit
+    best = None
+    coslat = math.cos(math.radians(record["lat"]))
+    for s in _network_stops_for_anchor():
+        try:
+            dx = (float(s["stop_lon"]) - record["lon"]) * coslat
+            dy = float(s["stop_lat"]) - record["lat"]
+        except (TypeError, ValueError):
+            continue
+        d2 = dx * dx + dy * dy
+        if best is None or d2 < best[0]:
+            best = (d2, str(s["stop_name"]).strip())
+    return best[1] if best else ""
+
+
+def _match_anchor_label(anchor_norm, svg_labels, anchor_raw=None):
+    """Find the drawn station label for an anchor name. Exact match first (after
+    case/trailing-number normalisation), then a tolerant match so "Gaushala"
+    still finds "Gaushala Chowk" / "Gaushala Bus Stop" (shortest label wins)."""
+    if anchor_raw:  # digit-aware exact match first: "Sukedhara1" vs "Sukedhara2"
+        for l in svg_labels:
+            if _collapse_repeated_text(str(l.get("text", "")).strip().casefold()) == anchor_raw:
+                return l
+    labels = [(_normalize_stop_name_for_match(l.get("text", "")), l) for l in svg_labels]
+    for key, l in labels:
+        if key == anchor_norm:
+            return l
+    loose = [(key, l) for key, l in labels
+             if key and (key.startswith(anchor_norm + " ")
+                         or anchor_norm.startswith(key + " ")
+                         or (" " + anchor_norm + " ") in (" " + key + " "))]
+    if loose:
+        return min(loose, key=lambda kl: len(kl[0]))[1]
+    prefix = [(key, l) for key, l in labels if key and key.startswith(anchor_norm)]
+    if prefix:
+        return min(prefix, key=lambda kl: len(kl[0]))[1]
+    return None
+
+
+def _first_anchor_label(names, svg_labels):
+    """names: one stop name or a list of alternatives (first one drawn wins)."""
+    if isinstance(names, str):
+        names = [names]
+    for nm in (names or []):
+        norm = _normalize_stop_name_for_match(nm)
+        if not norm:
+            continue
+        raw = _collapse_repeated_text(str(nm).strip().casefold())
+        label = _match_anchor_label(norm, svg_labels, raw)
+        if label is not None:
+            return label
+    return None
+
+
+def _pinned_landmark_position(record, svg_labels, markers, segments, eff_size):
+    """Fixed spot: the anchor stop's drawn marker, offset to a fixed side of the
+    line through it. Independent of other routes, labels and other icons.
+    Returns ((x, y), (marker_x, marker_y)) or None if the anchor isn't drawn."""
+    names = record.get("anchor") or _fixed_anchor_stop_name(record)
+    label = _first_anchor_label(names, svg_labels)
+    if label is None:
+        return None
+    try:
+        bx, by = _snap_label_to_marker(label, markers or [])
+    except (TypeError, ValueError, KeyError):
+        return None
+
+    # "Between two stops": put the icon on the stretch of line between the
+    # anchor stop and "anchor2", offset sideways from that stretch.
+    if record.get("anchor2"):
+        label2 = _first_anchor_label(record.get("anchor2"), svg_labels)
+        if label2 is None:
+            return None
+        try:
+            b2x, b2y = _snap_label_to_marker(label2, markers or [])
+        except (TypeError, ValueError, KeyError):
+            return None
+        t_frac = min(max(float(record.get("t", 0.5)), 0.0), 1.0)
+        mx, my = bx + (b2x - bx) * t_frac, by + (b2y - by) * t_frac
+        ddx, ddy = b2x - bx, b2y - by
+        ln = math.hypot(ddx, ddy) or 1.0
+        nx, ny = -ddy / ln, ddx / ln
+        if nx < -1e-6 or (abs(nx) <= 1e-6 and ny < 0):
+            nx, ny = -nx, -ny           # canonical, route-independent sign
+        side = 1 if float(record.get("side", 1) or 1) >= 0 else -1
+        off = eff_size * float(record.get("offset", 1.0))
+        return (mx + side * nx * off, my + side * ny * off), (mx, my)
+
+    # Only lines that actually touch this marker decide the direction.
+    touching = []
+    for (ax, ay, cx, cy) in segments:
+        d, nrm = _point_segment_dist_and_normal(bx, by, ax, ay, cx, cy)
+        if d < 2.0:
+            touching.append(nrm)
+    if touching:
+        nx, ny = touching[0]
+        # canonicalise so the sign never depends on route/segment order
+        if nx < -1e-6 or (abs(nx) <= 1e-6 and ny < 0):
+            nx, ny = -nx, -ny
+    else:
+        nx, ny = 0.0, -1.0
+    side = 1 if float(record.get("side", 1) or 1) >= 0 else -1
+    dist = eff_size * 1.0
+    return (bx + side * nx * dist, by + side * ny * dist), (bx, by)
+
+
+def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
+                               icon_size=28, schematic=False):
+    """Embed geographic vector landmarks into the LOOM SVG.
+
+    Each landmark is placed either:
+      - anchored to its nearest real transit stop's actual rendered
+        position (found by matching stop names to the SVG's own
+        station-label text) -- this is the only reliable option in
+        schematic/octilinear mode, since octi's layout distorts real-world
+        coordinates; or
+      - if no matching station label is found, a plain linear scaling of
+        its real lon/lat into the map's bounding box (only meaningful in
+        the non-schematic, geographically-accurate layout).
+
+    Either way, the icon is then nudged off any transit line it would
+    otherwise sit on top of (using the map's actual drawn line geometry,
+    not an assumption about where lines "should" be), with a thin dotted
+    leader line back to its anchor point when it had to move.
+    """
+    records = get_landmark_records(selected_landmarks)
+    rani_pokhari = None
+    if not schematic:
+        rani_pokhari = next(
+            (record for record in records if record["name"] == "Rani Pokhari"),
+            None,
+        )
+        if rani_pokhari:
+            records = [
+                record for record in records
+                if record["name"] != "Rani Pokhari"
+            ]
+    vb = _svg_viewbox(svg)
+    if (not records and rani_pokhari is None) or not selected_routes or vb is None:
+        return svg
+
+    vx, vy, vw, vh = vb
+    route_stops = _collect_route_stops_with_names(selected_routes)
+    if not route_stops:
+        return svg
+
+    svg_labels = get_svg_label_texts(svg)
+    markers = _extract_svg_station_markers(svg)
+    segments = _extract_svg_polyline_segments(svg)
+
+    eff_size = icon_size
+    if segments or svg_labels:
+        max_side = max(vw, vh)
+        canvas_cap = max_side * (
+            0.07 if len(records) > 6 else 0.09 if len(records) > 3 else 0.12
+        )
+        eff_size = min(eff_size, canvas_cap)
+        min_side_cap = min(vw, vh) * 0.12
+        if eff_size > min_side_cap:
+            eff_size = max(eff_size * 0.75, min(eff_size, min_side_cap))
+    eff_size = max(eff_size, 16.0)
+
+    lon_min = min(s["lon"] for s in route_stops)
+    lon_max = max(s["lon"] for s in route_stops)
+    lat_min = min(s["lat"] for s in route_stops)
+    lat_max = max(s["lat"] for s in route_stops)
+    lon_span = max(lon_max-lon_min, 1e-9)
+    lat_span = max(lat_max-lat_min, 1e-9)
+
+    def geo_to_svg(lon, lat):
+        return (vx + ((lon-lon_min)/lon_span)*vw, vy + ((lat_max-lat)/lat_span)*vh)
+
+    rani_xy = (
+        [geo_to_svg(lon, lat) for lon, lat in RANI_POKHARI_RING]
+        if rani_pokhari else []
+    )
+
+    # Obstacles an icon should not sit on: drawn lines, OTHER stops' markers
+    # and station-name text. Label text is approximated by its base path.
+    label_segments = []
+    for lab in svg_labels:
+        ends = lab.get("ends")
+        if ends:
+            label_segments.append(tuple(ends))
+
+    def _placement_cost(px, py, dist, placed_xy, own_base):
+        cost = 0.6 * dist / eff_size
+        
+        d_base = math.hypot(px - own_base[0], py - own_base[1])
+        cost += 1.2 * max(0.0, d_base - eff_size * 1.5) / eff_size
+        line_clear = eff_size * 0.5 + 3.0
+        for (ax, ay, bx2, by2) in segments:
+            d, _n = _point_segment_dist_and_normal(px, py, ax, ay, bx2, by2)
+            if d < line_clear:
+                cost += 8.0 * (line_clear - d) / eff_size  # strongly avoid covering transit lines
+        label_clear = eff_size * 0.5
+        for (ax, ay, bx2, by2) in label_segments:
+            d, _n = _point_segment_dist_and_normal(px, py, ax, ay, bx2, by2)
+            if d < label_clear:
+                cost += 0.6 * (label_clear - d) / eff_size
+        marker_clear = eff_size * 0.62
+        for (mx, my) in markers:
+            d = math.hypot(px - mx, py - my)
+            if d < marker_clear:
+                cost += 1.5 * (marker_clear - d) / eff_size
+        icon_clear = eff_size * 1.1
+        for (ox, oy) in placed_xy:
+            d = math.hypot(px - ox, py - oy)
+            if d < icon_clear:
+                cost += 4.0 * (icon_clear - d) / eff_size
+        return cost
+
+    # Candidate spots: 8 directions (octilinear-friendly) at a few short
+    # distances. The smallest distance is already far enough that the icon
+    # doesn't sit on top of its own stop marker/name.
+    directions = [(math.cos(math.radians(a)), math.sin(math.radians(a)))
+                  for a in range(0, 360, 45)]
+    distances = [eff_size * f for f in (0.85, 1.05, 1.3, 1.6)]
+
+    placements = []
+    placed_xy = []
+    for record in records:
+        if schematic:
+            # PINNED placement: fixed anchor stop + fixed side, so selecting
+            # more routes never moves the icon relative to its stop/line.
+            pinned = _pinned_landmark_position(
+                record, svg_labels, markers, segments, eff_size)
+            if pinned is not None:
+                (x, y), (base_x, base_y) = pinned
+                placements.append((record, x, y, base_x, base_y, False))
+                placed_xy.append((x, y))
+                continue
+            # No drawn anchor: SKIP this landmark entirely instead of
+            # guessing a spot from a nearest-stop estimate. If the anchor
+            # stop (or anchor2, when defined) isn't rendered on the map,
+            # the icon would land somewhere misleading, so it doesn't
+            # appear at all.
+            continue
+        else:
+            # Geographic (non-schematic) map: ORIGINAL behaviour, unchanged.
+            base_x, base_y = geo_to_svg(record["lon"], record["lat"])
+            max_shift = eff_size * 1.25
+            x, y, moved = _clear_landmark_of_lines(
+                base_x, base_y, segments, eff_size * 1.6
+            )
+            x, y = _clamp_shift(base_x, base_y, x, y, max_shift)
+            placements.append((record, x, y, base_x, base_y, moved))
+
+    # Spread icons apart on BOTH map types. In schematic mode several
+    # landmarks can resolve to nearly the same drawn stop, and stacking
+    # them un-separated renders as a solid black blob (multiple opaque
+    # SVG icons on top of each other). _separate_landmark_icons clamps
+    # every icon to within ~1.25 icon-widths of its OWN stop, so icons
+    # stay at their respective stops while no longer overlapping.
+    canvas_limit = max(vx + vw, vy + vh) * 2.0
+    if not schematic:  # schematic icons are pinned; separation would move them
+        _separate_landmark_icons(placements, eff_size, segments, canvas_limit)
+
+    if not placements and not rani_xy:
+        return svg
+
+    pad = max(icon_size * 2.0, min(vw, vh) * 0.035)
+    all_x = (
+        [vx, vx + vw]
+        + [p[1] for p in placements]
+        + [x for x, _ in rani_xy]
+    )
+    all_y = (
+        [vy, vy + vh]
+        + [p[2] for p in placements]
+        + [y for _, y in rani_xy]
+    )
+    new_min_x, new_max_x = min(all_x) - pad, max(all_x) + pad
+    new_min_y, new_max_y = min(all_y) - pad, max(all_y) + pad
+
+    rani_markup = ""
+    if rani_xy:
+        rani_path = "M " + " L ".join(
+            f"{x:.3f} {y:.3f}" for x, y in rani_xy
+        ) + " Z"
+        rani_markup = (
+            '\n<!-- Rani Pokhari shoreline: OpenStreetMap contributors -->\n'
+            f'<path d="{rani_path}" fill="{RANI_POKHARI_FILL}" '
+            f'stroke="{RANI_POKHARI_STROKE}" stroke-width="1" '
+            'stroke-linejoin="round" pointer-events="visiblePainted">'
+            '<title>Rani Pokhari - OpenStreetMap contributors</title></path>'
+        )
+    parts = []
+    for record, x, y, base_x, base_y, moved in placements:
+        # Dotted leader line only on the GEOGRAPHIC map. On the octilinear
+        # (schematic) map the icon sits at/near its own stop, so the line
+        # is just clutter there.
+        if moved and not schematic:
+            parts.append(
+                f'<line x1="{base_x:.3f}" y1="{base_y:.3f}" '
+                f'x2="{x:.3f}" y2="{y:.3f}" '
+                f'stroke="#9ca3af" stroke-width="1" stroke-dasharray="3,3"/>'
+            )
+        # Per-landmark scale: e.g. Pashupati/Boudha carry "scale": 0.55 in
+        # the LANDMARKS dict, so they render smaller than the default size.
+        landmark_size = eff_size * float(record.get("scale", 1.0) or 1.0)
+        parts.append(_svg_landmark_group(record, x, y, landmark_size))
+
+    markup = "\n<!-- Geographic vector landmarks -->\n"
+    markup += "".join(parts)
+    markup += "\n<!-- End geographic vector landmarks -->\n"
+
+    closing = svg.lower().rfind("</svg>")
+    if closing == -1:
+        # ET may have serialized tags with a namespace prefix (e.g.
+        # "</ns0:svg>") if namespace registration was missed -- fall back
+        # to the last element-closing tag rather than silently dropping
+        # the landmarks.
+        closing = svg.lower().rfind("</")
+        if closing == -1:
+            return svg
+    updated = svg[:closing] + markup + svg[closing:]
+    updated = re.sub(
+        r'(\bviewBox\s*=\s*["\'])[-\d.eE+]+\s+[-\d.eE+]+\s+[-\d.eE+]+\s+[-\d.eE+]+(["\'])',
+        lambda m: m.group(1) + f"{new_min_x:.3f} {new_min_y:.3f} "
+                             f"{new_max_x-new_min_x:.3f} {new_max_y-new_min_y:.3f}" + m.group(2),
+        updated, count=1, flags=re.IGNORECASE
+    )
+    return insert_river_markup(updated, rani_markup)
+
+
+def _separate_landmark_icons(placements, icon_size, segments, max_push):
+    """Push landmark icons apart so no two icons overlap each other.
+
+    Two landmarks whose nearest stops anchor them to the same region
+    (common in schematic mode, where several landmarks can resolve to the
+    same weighted cluster of stop labels) would otherwise be drawn stacked
+    on top of one another. This nudges each icon away from its nearest
+    already-placed neighbour, one pass at a time, while keeping the result
+    clear of the transit lines.
+    """
+
+   
+    min_gap = icon_size * 1.7
+    moved_any = False
+    for i in range(len(placements)):
+        record_i, x_i, y_i, bx_i, by_i, moved_i = placements[i]
+        for _ in range(48):  # bounded relaxation passes
+            best = None
+            for j in range(len(placements)):
+                if i == j:
+                    continue
+                _, x_j, y_j = placements[j][0], placements[j][1], placements[j][2]
+                dx, dy = x_i - x_j, y_i - y_j
+                dist = math.hypot(dx, dy) or 1e-6
+                if dist < min_gap and (best is None or dist < best[0]):
+                    best = (dist, dx / dist, dy / dist)
+            if best is None:
+                break
+            dist, ux, uy = best
+            step = min_gap - dist + icon_size * 0.25
+            nx = x_i + ux * step
+            ny = y_i + uy * step
+            nx, ny, moved = _clear_landmark_of_lines(nx, ny, segments, icon_size)
+            # Stay near THIS icon's own anchor, not just inside the canvas.
+            nx, ny = _clamp_shift(bx_i, by_i, nx, ny, icon_size * 1.25)
+            x_i, y_i = nx, ny
+            moved_i = moved_i or moved
+            moved_any = True
+        placements[i] = (record_i, x_i, y_i, bx_i, by_i, moved_i)
+
+
+    n = len(placements)
+    if n >= 2:
+        cx = sum(p[1] for p in placements) / n
+        cy = sum(p[2] for p in placements) / n
+        cluster = [p for p in placements if math.hypot(p[1] - cx, p[2] - cy) < min_gap]
+        if len(cluster) >= 2:
+            ring_r = min_gap * max(1.0, 0.55 * len(cluster))
+            by_index = {id(p): idx for idx, p in enumerate(placements)}
+            for k, p in enumerate(cluster):
+                angle = 2 * math.pi * k / len(cluster)
+                tx = cx + math.cos(angle) * ring_r
+                ty = cy + math.sin(angle) * ring_r
+                idx = by_index[id(p)]
+                rec, _, _, bx, by, mvd = placements[idx]
+                tx, ty, moved = _clear_landmark_of_lines(tx, ty, segments, icon_size)
+                
+                tx, ty = _clamp_shift(cx, cy, tx, ty, min_gap * 1.15)
+                tx, ty = _clamp_shift(bx, by, tx, ty, min_gap * 1.6)
+                placements[idx] = (rec, tx, ty, bx, by, mvd or moved)
+                moved_any = True
+    return moved_any
+
+
+def _point_segment_dist_and_normal(px, py, ax, ay, bx, by):
+    """Shortest distance from point (px,py) to segment (a->b), plus a unit
+    vector pointing from the segment out towards the point (used to push a
+    landmark icon clear of the line it's closest to)."""
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    if length_sq == 0:
+        ddx, ddy = px - ax, py - ay
+        dist = math.hypot(ddx, ddy)
+        return (dist, (1.0, 0.0)) if dist == 0 else (dist, (ddx / dist, ddy / dist))
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
+    cx, cy = ax + t * dx, ay + t * dy
+    ddx, ddy = px - cx, py - cy
+    dist = math.hypot(ddx, ddy)
+    if dist == 0:
+        # Point sits exactly on the line -- push perpendicular to it.
+        seg_len = math.hypot(dx, dy) or 1.0
+        return dist, (-dy / seg_len, dx / seg_len)
+    return dist, (ddx / dist, ddy / dist)
+
+
+def _collect_route_line_segments(fig):
+    """Pull every route-line segment (in lon/lat data space) already drawn
+    on the figure, so landmark icons can be checked against them."""
+    segments = []
+    for trace in fig.data:
+        mode = getattr(trace, "mode", "") or ""
+        if "lines" not in mode:
+            continue
+        xs, ys = trace.x, trace.y
+        if xs is None or ys is None:
+            continue
+        xs, ys = list(xs), list(ys)
+        for i in range(len(xs) - 1):
+            x0, y0, x1, y1 = xs[i], ys[i], xs[i + 1], ys[i + 1]
+            if None in (x0, y0, x1, y1):
+                continue
+            segments.append((float(x0), float(y0), float(x1), float(y1)))
+    return segments
+
+
+def _clear_landmark_of_lines(lon, lat, segments, icon_size_deg):
+    """Nudge (x, y) away from the nearest route-line segment so the
+    landmark icon never sits on top of / touches a transit line. Returns
+    (new_x, new_y, moved).
+
+    One push can land the icon on a *different* nearby segment (lines run
+    close together), so iterate until the icon is clear of every segment,
+    bounded so dense/overlapping geometry can't loop forever.
+    """
+    radius = (icon_size_deg / 2.0) * 1.15  # icon half-size + a small margin
+    x, y = lon, lat
+    for _ in range(12):  # bounded passes
+        best_dist, best_dir = None, (0.0, 1.0)
+        for (x0, y0, x1, y1) in segments:
+            dist, direction = _point_segment_dist_and_normal(x, y, x0, y0, x1, y1)
+            if best_dist is None or dist < best_dist:
+                best_dist, best_dir = dist, direction
+
+        if best_dist is None or best_dist >= radius:
+            break
+
+        push = min(radius - best_dist + radius * 0.35, radius * 2.5)
+        nx, ny = best_dir
+        norm = math.hypot(nx, ny) or 1.0
+        nx, ny = nx / norm, ny / norm
+        x, y = x + nx * push, y + ny * push
+    return x, y, (x, y) != (lon, lat)
+
+
+def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.0026):
+    """Add landmark icons in Plotly longitude/latitude data coordinates.
+
+    Each landmark is anchored to its real (lon, lat) by default, so it
+    stays in the correct relative place as the user zooms/pans, and is
+    drawn at a fixed size in data-space (icon_size_deg), so every landmark
+    reads at the same visual size regardless of how spread out the
+    selected routes are.
+
+    Before drawing, each landmark is checked against every route line
+    already on the map; if the icon would touch or overlap a line, it is
+    nudged sideways just far enough to clear it, and a thin dotted leader
+    line is drawn back to the landmark's real position so its true
+    location is still visible.
+
+    Landmark artwork is embedded as a Plotly layout image, using uploaded
+    SVG artwork when available and the built-in SVG artwork otherwise.
+    """
+    segments = _collect_route_line_segments(fig)
+    edit_meta = []   # per-landmark data the in-browser Edit mode needs
+
+    for record in get_landmark_records(selected_landmarks):
+        if record["name"] == "Rani Pokhari":
+            ring = RANI_POKHARI_RING
+            path = "M " + " L ".join(
+                f"{lon:.7f},{lat:.7f}" for lon, lat in ring
+            ) + " Z"
+            fig.add_shape(
+                type="path",
+                path=path,
+                xref="x",
+                yref="y",
+                fillcolor=RANI_POKHARI_FILL,
+                line=dict(color=RANI_POKHARI_STROKE, width=1),
+                layer="below",
+            )
+            fig.add_trace(go.Scatter(
+                x=[record["lon"]],
+                y=[record["lat"]],
+                mode="markers",
+                marker=dict(size=18, color="rgba(0,0,0,0)"),
+                hovertemplate=(
+                    "<b>Rani Pokhari</b><br>"
+                    "Outline: © OpenStreetMap contributors<extra></extra>"
+                ),
+                showlegend=False,
+            ))
+            continue
+
+        true_lon, true_lat = float(record["lon"]), float(record["lat"])
+        # Nudge the icon off any route line it would otherwise touch --
+        # same collision handling the LOOM map uses (_clear_landmark_of_lines
+        # works in plain x/y numbers, so pass lon as x and lat as y).
+        icon_lon, icon_lat, moved = _clear_landmark_of_lines(
+            true_lon, true_lat, segments, icon_size_deg
+        )
+        # Same anti-drift cap as the LOOM map: the icon may shift only a
+        # little over one icon width from its real position, so the dotted
+        # leader line stays short and the icon reads as "near this stop".
+        max_shift_deg = icon_size_deg * 1.25
+        d_lon = icon_lon - true_lon
+        d_lat = icon_lat - true_lat
+        shift = math.hypot(d_lon, d_lat)
+        if shift > max_shift_deg:
+            icon_lon = true_lon + d_lon * (max_shift_deg / shift)
+            icon_lat = true_lat + d_lat * (max_shift_deg / shift)
+
+        leader_index = None
+        if moved:
+            leader_index = len(fig.layout.shapes)
+            fig.add_shape(
+                type="line",
+                xref="x", yref="y",
+                x0=true_lon, y0=true_lat, x1=icon_lon, y1=icon_lat,
+                line=dict(color="#9ca3af", width=1, dash="dot"),
+                layer="above",
+            )
+
+        custom_svg = get_landmark_custom_svg(record)
+        # Per-landmark scale (e.g. Pashupati/Boudha = 0.55 in LANDMARKS):
+        # shrinks the icon in data-space so it renders smaller on the map.
+        landmark_scale = float(record.get("scale", 1.0) or 1.0)
+        eff_icon_deg = icon_size_deg * landmark_scale
+        image_index = len(fig.layout.images)
+        if custom_svg:
+            landmark_svg = landmark_grey_tint(custom_svg)
+        else:
+            landmark_svg = (
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+                f'{_svg_landmark_group(record, 50.0, 50.0, 80.0)}</svg>'
+            )
+        sizex = eff_icon_deg / max(math.cos(math.radians(icon_lat)), 0.2)
+        fig.add_layout_image(
+            dict(
+                source=landmark_svg_data_uri(landmark_svg),
+                xref="x", yref="y",
+                x=icon_lon, y=icon_lat,
+                xanchor="center", yanchor="middle",
+                sizex=sizex, sizey=eff_icon_deg,
+                sizing="contain",
+                layer="above",
+            )
+        )
+        # Name label: hidden by default, revealed only when the icon is
+        # touched/tapped (mobile) or hovered (desktop) -- a real click-to-
+        # toggle needs custom JS wired into the embedded plot HTML, but an
+        # invisible marker with Plotly's own built-in hover tooltip gets the
+        # same "touch it to see the name, otherwise nothing shows" behavior
+        # for free: on touch devices, tapping a point fires the same hover
+        # event a mouse-over would, and the tooltip disappears again once
+        # you tap/move elsewhere.
+        # Editable copy of this icon for the Edit mode: the same artwork drawn
+        # in a 100x100 box (icon fills 80% of it), so 1/0.8 converts the icon
+        # size into the size of that box.
+        try:
+            edit_meta.append(dict(
+                name=str(record["name"]),
+                lon=icon_lon, lat=icon_lat,
+                sizex=(eff_icon_deg / max(math.cos(math.radians(icon_lat)), 0.2)) / 0.8,
+                sizey=eff_icon_deg / 0.8,
+                body=_svg_landmark_group(record, 50.0, 50.0, 80.0),
+                image_index=image_index,
+                leader_index=leader_index,
+            ))
+        except Exception:
+            pass
+        touch_px = 30 * max(icon_size_deg / 0.0026, 1.0)
+        fig.add_trace(
+            go.Scatter(
+                x=[icon_lon], y=[icon_lat],
+                xaxis="x", yaxis="y",
+                mode="markers",
+                marker=dict(size=touch_px, color="rgba(0,0,0,0)"),
+                                customdata=[[record["name"]]],
+                hovertemplate=f"<b>{html.escape(record['name'])}</b><extra></extra>",
+                showlegend=False,
+            )
+        )
+
+    if edit_meta:
+        fig.update_layout(meta=dict(fig.layout.meta or {}, landmarks=edit_meta))
 
 
 @st.cache_data
@@ -612,51 +2923,26 @@ def _offset_polyline(lons, lats, offset_deg):
     return new_lons, new_lats
 
 
-def _octilinear_path(lons, lats):
-    """Build horizontal, vertical, and diagonal legs between stop nodes."""
-    if len(lons) < 2:
-        return list(lons), list(lats)
-    path_lons, path_lats = [lons[0]], [lats[0]]
-    for index in range(1, len(lons)):
-        start_lon, start_lat = lons[index - 1], lats[index - 1]
-        end_lon, end_lat = lons[index], lats[index]
-        dx, dy = end_lon - start_lon, end_lat - start_lat
-        if not dx or not dy:
-            path_lons.append(end_lon)
-            path_lats.append(end_lat)
-            continue
-        diagonal = min(abs(dx), abs(dy))
-        diagonal_lon = start_lon + math.copysign(diagonal, dx)
-        diagonal_lat = start_lat + math.copysign(diagonal, dy)
-        path_lons.append(diagonal_lon)
-        path_lats.append(diagonal_lat)
-        if diagonal_lon != end_lon:
-            path_lons.append(end_lon)
-            path_lats.append(diagonal_lat)
-        elif diagonal_lat != end_lat:
-            path_lons.append(diagonal_lon)
-            path_lats.append(end_lat)
-    return path_lons, path_lats
-
-
 def build_transit_map(selected_routes, route_color_map, route_name_map,
                       route_agency_map=None,
                       title_text="Transit Map of Kathmandu Valley",
                       separate_overlapping_routes=True,
                       route_spacing=1.0,
-                      label_density="Major exchanges only",
+                      label_density="Every other stop",
                       show_stop_markers=True,
-                      schematic=False,
-                      hidden_label_names=()):
-    """Build a clean schematic transit map.
+                      hidden_label_names=(),
+                      selected_landmarks=(),
+                      landmark_icon_size_deg=0.0026,
+                      show_river=False,
+                      show_road=False):
+    """Build the Plotly transit map with automatic label decluttering.
 
-    Improvements:
-      * station names are plain text (no boxes/pills)
-      * labels are placed diagonally/sideways with a small leader line
-      * stops shared by multiple selected routes get ONE common oval marker
-      * each route is visually connected to the common stop with a dotted line
-      * route lines can still be fanned apart for busy corridors
-      * generous canvas/margins make the map less congested on wide screens
+    The important change here is that labels are treated as screen-space
+    objects rather than being separated only by geographic distance.
+    Interchanges/terminals are placed first, then ordinary stop labels are
+    placed around them using many possible positions.  If a label cannot be
+    placed cleanly, the route and stop marker remain visible and the name is
+    still available in hover.
     """
     fig = go.Figure()
 
@@ -671,6 +2957,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         ordered = route_stops_ordered(route_id)
         if ordered.empty:
             continue
+
         ordered = ordered.copy()
         ordered["stop_lat"] = pd.to_numeric(ordered["stop_lat"], errors="coerce")
         ordered["stop_lon"] = pd.to_numeric(ordered["stop_lon"], errors="coerce")
@@ -691,6 +2978,10 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             )
             stop_routes.setdefault(key, []).append(route_id)
 
+    landmark_records = get_landmark_records(selected_landmarks)
+    map_lons.extend([r["lon"] for r in landmark_records])
+    map_lats.extend([r["lat"] for r in landmark_records])
+
     if not route_data:
         fig.add_annotation(
             text="No stop-sequence data found for the selected route(s).",
@@ -700,7 +2991,6 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         )
         return fig
 
-    # Keep route IDs unique for shared-stop counting.
     for key in stop_routes:
         stop_routes[key] = list(dict.fromkeys(stop_routes[key]))
 
@@ -712,24 +3002,31 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
     )
     bbox_diag = max(bbox_diag, 0.01)
 
-    # These are deliberately modest so the route remains recognizable while
-    # overlapping lines become readable.
+    # Keep parallel routes visually separated without moving them too far.
     route_offset_unit = bbox_diag * 0.010 * route_spacing
 
-    def format_stop_name(stop_name, max_chars=20):
+    def format_stop_name(stop_name, max_chars=18):
+        """Wrap long stop names so they do not create very wide labels."""
         if pd.isna(stop_name):
             return ""
         text = str(stop_name).strip()
         if not text:
             return ""
+
         words = text.split()
-        lines, current = [], ""
+        lines = []
+        current = ""
         for word in words:
+            # Break extremely long single words as a last resort.
             if len(word) > max_chars:
                 if current:
                     lines.append(current)
                     current = ""
-                lines.append(word)
+                while len(word) > max_chars:
+                    lines.append(word[:max_chars])
+                    word = word[max_chars:]
+                if word:
+                    current = word
             elif not current:
                 current = word
             elif len(current) + 1 + len(word) <= max_chars:
@@ -737,13 +3034,13 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             else:
                 lines.append(current)
                 current = word
+
         if current:
             lines.append(current)
         return "<br>".join(lines)
 
     def stop_label_name(stop_name):
-        """Treat numbered variants such as 'Gaushala 1' and 'Gaushala 2'
-        as one nearby label while preserving the original stop markers."""
+        """Group numbered variants such as 'Gaushala 1' and 'Gaushala 2'."""
         text = "" if pd.isna(stop_name) else str(stop_name).strip()
         return re.sub(r"\s+\d+\s*$", "", text).strip() or text
 
@@ -753,30 +3050,27 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         if str(name).strip()
     }
 
-    def stop_distance_m(lat1, lon1, lat2, lon2):
-        lat_mid = math.radians((lat1 + lat2) / 2.0)
-        return math.hypot(
-            (lat2 - lat1) * 111320.0,
-            (lon2 - lon1) * 111320.0 * math.cos(lat_mid),
-        )
+    # ------------------------------------------------------------
+    # SCREEN-SPACE LABEL COLLISION ENGINE
+    # ------------------------------------------------------------
+    plot_width_px = 980
+    plot_height_px = 680
+    label_lon_min, label_lon_max = min(map_lons), max(map_lons)
+    label_lat_min, label_lat_max = min(map_lats), max(map_lats)
 
     def label_width_chars(label):
         return max((len(line) for line in label.split("<br>")), default=0)
 
-    label_boxes = []
-    plot_width_px = 760
-    plot_height_px = 650
-    label_lon_min, label_lon_max = min(map_lons), max(map_lons)
-    label_lat_min, label_lat_max = min(map_lats), max(map_lats)
-
-    def label_box(label, x, y, xshift, yshift, xanchor, yanchor):
-        """Estimate an annotation's screen-space box before drawing it."""
+    def label_box(label, x, y, xshift, yshift, xanchor, yanchor, font_size=10):
         x_range = max(label_lon_max - label_lon_min, 1e-9)
         y_range = max(label_lat_max - label_lat_min, 1e-9)
+
         anchor_x = (x - label_lon_min) / x_range * plot_width_px + xshift
         anchor_y = (label_lat_max - y) / y_range * plot_height_px - yshift
-        width = max(label_width_chars(label) * 8.0, 30) + 10
-        height = max(len(label.split("<br>")) * 14.0, 14) + 8
+
+        # Arial/Plotly text is approximately 6.5 px per character at 10 px.
+        width = max(label_width_chars(label) * (font_size * 0.62), 28) + 10
+        height = max(len(label.split("<br>")) * (font_size + 4), font_size + 4) + 8
 
         if xanchor == "right":
             left = anchor_x - width
@@ -791,65 +3085,135 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             top = anchor_y - height / 2
         else:
             top = anchor_y - height
+
         return left, top, left + width, top + height
 
-    def choose_label_position(label, x, y):
-        """Choose the first offset whose text box does not touch another."""
-        nonlocal label_counter
-        for attempt in range(len(label_positions)):
-            position_index = (label_counter + attempt) % len(label_positions)
-            xshift, yshift, xanchor, yanchor = label_positions[position_index]
-            candidate = label_box(
-                label, x, y, xshift, -yshift, xanchor, yanchor
-            )
-            padded = (
-                candidate[0] - 8, candidate[1] - 6,
-                candidate[2] + 8, candidate[3] + 6,
-            )
-            if not any(
-                padded[0] < box[2] and box[0] < padded[2]
-                and padded[1] < box[3] and box[1] < padded[3]
-                for box in label_boxes
-            ):
-                label_counter = position_index + 1
-                label_boxes.append(padded)
-                return xshift, yshift, xanchor, yanchor
-        return None
-
-    # ------------------------------------------------------------
-    # LABEL POSITIONS
-    # Diagonal/side positions are rotated through the network.  Labels are
-    # plain text and use a thin leader line rather than a white box.
-    # ------------------------------------------------------------
-    # SIDE placements only: every candidate has a substantial horizontal
-    # offset so the leader line always goes left or right of the stop,
-    # never straight up/down across the route lines (vertical leaders were
-    # criss-crossing and attaching names to the wrong stop).
     label_positions = [
-        # PURELY HORIZONTAL leaders only: yshift = 0 so the leader line goes
-        # straight left or straight right of the stop. Two horizontal leaders
-        # can never cross each other (the Jaybageshwori / Gaushala issue).
         (24, 0, "left", "middle"),
         (-24, 0, "right", "middle"),
         (38, 0, "left", "middle"),
         (-38, 0, "right", "middle"),
     ]
+
+    occupied_label_boxes = []
+    placed_leader_lines = []  # ((x1,y1),(x2,y2)) of already-placed leaders
     label_counter = 0
 
-    def next_label_position():
-        nonlocal label_counter
-        pos = label_positions[label_counter % len(label_positions)]
-        label_counter += 1
-        return pos
+    def _segments_cross(seg_a, seg_b):
+        """True if two line segments properly intersect."""
+        def cross(o, a, b):
+            return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 
-    # Track label locations only for ordinary stops. Shared stops always get
-    # one label at their common/original coordinate.
-    ordinary_label_points = []
-    numbered_label_points = {}
-    seen_base_names = set()  # one label per base name (e.g. 'Kalanki'
+        def is_point_on_seg(p, q, r):
+            return (min(p[0], r[0]) <= q[0] <= max(p[0], r[0])
+                    and min(p[1], r[1]) <= q[1] <= max(p[1], r[1]))
+
+        p1, p2 = seg_a
+        q1, q2 = seg_b
+        d1 = cross(q1, q2, p1)
+        d2 = cross(q1, q2, p2)
+        d3 = cross(p1, p2, q1)
+        d4 = cross(p1, p2, q2)
+        if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)):
+            return True
+        return False
+
+    def leader_crosses_existing(anchor_x, anchor_y, end_x, end_y, min_angle_diff=20):
+        """True if this leader line crosses any placed leader, or approaches
+        one at nearly the same angle near the anchor (which makes two labels
+        look ambiguous about which stop they belong to)."""
+        for (q1, q2) in placed_leader_lines:
+            if _segments_cross(((anchor_x, anchor_y), (end_x, end_y)), (q1, q2)):
+                return True
+
+
+            a1 = math.atan2(end_y - anchor_y, end_x - anchor_x)
+            a2 = math.atan2(q2[1] - q1[1], q2[0] - q1[0])
+            diff = abs(math.degrees(a1 - a2)) % 180.0
+            diff = min(diff, 180.0 - diff)
+            if diff < min_angle_diff:
+
+                if math.hypot(anchor_x - q1[0], anchor_y - q1[1]) < 90:
+                    return True
+        return False
+
+    def choose_label_position(label, x, y, font_size=10, extra_gap=7):
+        """Return a collision-free annotation position, or None."""
+        nonlocal label_counter
+        for attempt in range(len(label_positions)):
+            position_index = (label_counter + attempt) % len(label_positions)
+            xshift, yshift, xanchor, yanchor = label_positions[position_index]
+
+            candidate = label_box(
+                label, x, y,
+                xshift, -yshift,
+                xanchor, yanchor,
+                font_size=font_size,
+            )
+
+            padded = (
+                candidate[0] - extra_gap,
+                candidate[1] - extra_gap,
+                candidate[2] + extra_gap,
+                candidate[3] + extra_gap,
+            )
+
+            collision = any(
+                padded[0] < box[2]
+                and box[0] < padded[2]
+                and padded[1] < box[3]
+                and box[1] < padded[3]
+                for box in occupied_label_boxes
+            )
+
+            if not collision:
+                label_counter = position_index + 1
+                occupied_label_boxes.append(padded)
+                return xshift, yshift, xanchor, yanchor
+
+        return None
+
+    def add_stop_label(label, x, y, font_size=10, arrow_color="#777777"):
+        """Add one collision-free label and return whether it was placed."""
+        if not label:
+            return False
+
+        position = choose_label_position(
+            label, x, y, font_size=font_size, extra_gap=8
+        )
+        if position is None:
+            return False
+
+        xshift, yshift, xanchor, yanchor = position
+        fig.add_annotation(
+            x=x,
+            y=y,
+            xref="x",
+            yref="y",
+            text=label,
+            showarrow=False,
+            xshift=xshift,
+            yshift=yshift,
+            xanchor=xanchor,
+            yanchor=yanchor,
+            align=(
+                "left" if xanchor == "left"
+                else "right" if xanchor == "right"
+                else "center"
+            ),
+            bgcolor="rgba(255,255,255,0)",
+            borderwidth=0,
+            borderpad=0,
+            font=dict(
+                size=font_size,
+                color="#111111",
+                family="Arial, sans-serif",
+            ),
+        )
+        return True
 
     # ------------------------------------------------------------
-    # DRAW ROUTES
+    # DRAW ROUTES + STOP MARKERS
     # ------------------------------------------------------------
     n_routes = max(len(route_data), 1)
     draw_cache = {}
@@ -860,21 +3224,27 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         route_label = route_name_map.get(route_id, route_id)
         agency_label = (route_agency_map or {}).get(route_id, "Unknown Agency")
         agency_group = f"agency-{agency_label}"
-        route_group = f"route-{route_id}"
 
+        # Agency heading: its own legend row (bold, no visible glyph) so
+        # EVERY route keeps its own color swatch underneath it.
         first_agency_route = not any(
-            getattr(trace, "legendgroup", None) == agency_group for trace in fig.data
+            getattr(trace, "legendgroup", None) == agency_group
+            for trace in fig.data
         )
         if first_agency_route:
             fig.add_trace(go.Scatter(
-                x=[None], y=[None],
+                x=[None],
+                y=[None],
                 mode="markers",
-                marker=dict(size=1, color="rgba(0,0,0,0)"),
+                marker=dict(size=1, color="rgba(0,0,0,0)", opacity=0),
                 name=f"<b>{html.escape(str(agency_label))}</b>",
                 legendgroup=agency_group,
+                showlegend=True,
                 hoverinfo="skip",
                 uid=f"agency-{route_id}",
             ))
+
+        legend_name = html.escape(str(route_label))
 
         lons = ordered["stop_lon"].tolist()
         lats = ordered["stop_lat"].tolist()
@@ -890,27 +3260,29 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         draw_cache[route_id] = (draw_lons, draw_lats)
 
         line_lons, line_lats = draw_lons, draw_lats
-        if schematic:
-            line_lons, line_lats = _octilinear_path(draw_lons, draw_lats)
 
-        # Route line.
         fig.add_trace(go.Scatter(
             x=line_lons,
             y=line_lats,
             mode="lines",
-            line=dict(color=color, width=5.5),
-            name=route_label,
+            line=dict(color=color, width=5.0),
+            name=legend_name,
             hoverinfo="skip",
-            legendgroup=route_group,
+            legendgroup=agency_group,
             uid=f"line-{route_id}",
             cliponaxis=False,
         ))
 
-        # Stop markers remain on the route copy. Shared-stop connectors are
-        # added below, so the common oval visually becomes the interchange.
-        marker_size = 7 if show_stop_markers else 9
+        marker_size = 8 if show_stop_markers else 9
         marker_color = "white" if show_stop_markers else "rgba(0,0,0,0)"
-        marker_line_width = 2.2 if show_stop_markers else 0
+        marker_line_width = 2.5 if show_stop_markers else 0
+
+        hover_names = [
+            "" if pd.isna(v) else str(v).strip()
+            for v in ordered["stop_name"]
+        ]
+        hover_sequences = ordered["stop_sequence"].tolist()
+
         fig.add_trace(go.Scatter(
             x=draw_lons,
             y=draw_lats,
@@ -920,20 +3292,151 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                 color=marker_color,
                 line=dict(color=color, width=marker_line_width),
             ),
-            hovertext=ordered["stop_name"],
-            hovertemplate="<b>%{hovertext}</b><br>Route: "
-                          + html.escape(str(route_label)) + "<extra></extra>",
+            text=hover_names,
+            customdata=hover_sequences,
+            hovertemplate=(
+                "<b>%{text}</b><br>"
+                "Route: " + html.escape(str(route_label)) +
+                "<br>Stop sequence: %{customdata}<extra></extra>"
+            ),
             showlegend=False,
-            legendgroup=route_group,
+            legendgroup=agency_group,
             cliponaxis=False,
             uid=f"stops-{route_id}",
         ))
 
-        # --------------------------------------------------------
-        # ORDINARY STOP LABELS
-        # --------------------------------------------------------
+    # ------------------------------------------------------------
+    # DRAW SHARED / INTERCHANGE CONNECTORS AND MARKERS
+    # ------------------------------------------------------------
+    shared_records = []
+
+    for shared_key in shared_stops:
+        name_key, lat, lon = shared_key
+        routes_here = stop_routes[shared_key]
+        if not routes_here:
+            continue
+
+        shared_name = name_key
+        for rid in routes_here:
+            ordered = route_data[rid]
+            for _, row in ordered.iterrows():
+                candidate = (
+                    "" if pd.isna(row["stop_name"])
+                    else str(row["stop_name"]).strip()
+                )
+                if candidate.casefold() == name_key:
+                    shared_name = candidate
+                    break
+            if shared_name != name_key:
+                break
+
+        label_name = stop_label_name(shared_name)
+        if label_name.casefold() in hidden_label_keys:
+            continue
+
+        # NEW: tie the interchange circle to the legend group of whichever
+        # route "owns" it first, so toggling that route's legend entry also
+        # hides the shared/interchange marker instead of leaving it stuck
+        # on the map forever. (A circle shared by routes from different
+        # agencies can only follow ONE of those legend groups -- see the
+        # caveat below build_transit_map.)
+        anchor_route = routes_here[0]
+        anchor_agency = (route_agency_map or {}).get(anchor_route, "Unknown Agency")
+        shared_legendgroup = f"agency-{anchor_agency}"
+
+        shared_points = []
+        shared_colors = []
+        shared_hovertext = []
+        for rid in routes_here:
+            ordered = route_data[rid]
+            draw_lons, draw_lats = draw_cache[rid]
+            for index, (_, row) in enumerate(ordered.iterrows()):
+                candidate_name = (
+                    "" if pd.isna(row["stop_name"])
+                    else str(row["stop_name"]).strip()
+                )
+                candidate_key = (
+                    candidate_name.casefold(),
+                    round(float(row["stop_lat"]), 6),
+                    round(float(row["stop_lon"]), 6),
+                )
+                if candidate_key == shared_key:
+                    shared_points.append((draw_lons[index], draw_lats[index]))
+                    shared_colors.append(
+                        ROUTE_COLOR_HEX.get(
+                            route_color_map.get(rid, "blue"),
+                            "#234FC9",
+                        )
+                    )
+                    shared_hovertext.append(shared_name)
+                    break
+
+        if shared_points:
+            fig.add_trace(go.Scatter(
+                x=[point[0] for point in shared_points],
+                y=[point[1] for point in shared_points],
+                mode="markers",
+                marker=dict(
+                    size=14,
+                    symbol="circle",
+                    color="white",
+                    line=dict(color=shared_colors, width=2.5),
+                ),
+                hovertext=shared_hovertext,
+                hovertemplate=(
+                    "<b>%{hovertext}</b><br>Shared by "
+                    + str(len(routes_here))
+                    + " routes<extra></extra>"
+                ),
+                showlegend=False,
+                legendgroup=shared_legendgroup,
+                cliponaxis=False,
+                uid=f"shared-center-{name_key}",
+            ))
+
+        if label_density != "Major exchanges only" or is_major_transit_stop(label_name):
+            shared_records.append({
+                "name": label_name,
+                "lat": lat,
+                "lon": lon,
+                "routes": routes_here,
+            })
+
+    # ------------------------------------------------------------
+    # BUILD LABEL CANDIDATES
+    # ------------------------------------------------------------
+    label_candidates = []
+    seen_candidate_keys = set()
+
+    # Interchanges have the highest priority.
+    for record in shared_records:
+        key = (
+            "shared",
+            record["name"].casefold(),
+            round(record["lat"], 6),
+            round(record["lon"], 6),
+        )
+        if key in seen_candidate_keys:
+            continue
+        seen_candidate_keys.add(key)
+        label_candidates.append({
+            "priority": 0,
+            "name": record["name"],
+            "lat": record["lat"],
+            "lon": record["lon"],
+            "font_size": 11,
+        })
+
+    # Collect terminal and ordinary stops.
+    for route_id, ordered in route_data.items():
+        draw_lons, draw_lats = draw_cache[route_id]
+        last_index = len(ordered) - 1
+
         for index, (_, stop_row) in enumerate(ordered.iterrows()):
-            stop_name = "" if pd.isna(stop_row["stop_name"]) else str(stop_row["stop_name"]).strip()
+            stop_name = (
+                "" if pd.isna(stop_row["stop_name"])
+                else str(stop_row["stop_name"]).strip()
+            )
             stop_lat = float(stop_row["stop_lat"])
             stop_lon = float(stop_row["stop_lon"])
             stop_key = (
@@ -942,199 +3445,203 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                 round(stop_lon, 6),
             )
 
-            # Shared stops are handled once, centrally, after all route lines.
             if stop_key in shared_stops:
                 continue
 
-            is_terminal = index == 0 or index == len(ordered) - 1
+            label_name = stop_label_name(stop_name)
+            if not label_name or label_name.casefold() in hidden_label_keys:
+                continue
+
+            is_terminal = index == 0 or index == last_index
+
             if label_density == "Major exchanges only":
-                label_name = stop_label_name(stop_name)
                 if not is_major_transit_stop(label_name):
                     continue
-            if label_density == "Every other stop" and index % 2 == 1 and not is_terminal:
-                continue
+
             if label_density == "Terminals & interchanges only" and not is_terminal:
                 continue
 
-            label_name = stop_label_name(stop_name)
-            if label_name.casefold() in hidden_label_keys:
-                continue
-            label = format_stop_name(label_name)
-            if not label:
-                continue
-            current_width = label_width_chars(label)
-            label_name_key = label_name.casefold()
-            # Numbered variants ('Kalanki 1', 'Kalanki 2', ...) collapse to one
-            # label: only the FIRST occurrence of a base name gets a label.
-            if label_name_key in seen_base_names:
+            if label_density == "Every other stop" and not is_terminal and index % 2 == 1:
                 continue
 
-            # Reserve enough geographic space for the actual text width.
-            # Long labels need more separation than short stop names.
-            too_close = any(
-                stop_distance_m(stop_lat, stop_lon, lat0, lon0)
-                < max(650, (current_width + previous_width) * 14)
-                for lat0, lon0, previous_width in ordinary_label_points
-            )
-            if too_close:
-                continue
-            ordinary_label_points.append((stop_lat, stop_lon, current_width))
-            seen_base_names.add(label_name_key)
+            label_candidates.append({
+                "priority": 1 if is_terminal else 2,
+                "name": label_name,
+                "lat": stop_lat,
+                "lon": stop_lon,
+                "font_size": 11 if is_terminal else 10,
+                "base_lat": stop_lat,
+                "base_lon": stop_lon,
+            })
 
-            position = choose_label_position(label, draw_lons[index], draw_lats[index])
-            if position is None:
-                continue
-            xshift, yshift, xanchor, yanchor = position
+    deduped_candidates = []
+    seen_base_names = set()
+    for candidate in label_candidates:
+        name_key = candidate["name"].casefold()
+        if name_key in seen_base_names:
+            continue
+        seen_base_names.add(name_key)
+        deduped_candidates.append(candidate)
 
-            fig.add_trace(go.Scatter(
-                x=[draw_lons[index]],
-                y=[draw_lats[index]],
-                mode="text",
-                text=[label],
-                textposition=(
-                    "middle right" if xanchor == "left"
-                    else "middle left" if xanchor == "right"
-                    else "middle center"
-                ),
-                textfont=dict(size=10, color="#111111", family="Arial, sans-serif"),
-                hoverinfo="skip",
-                showlegend=False,
-                legendgroup=route_group,
-                cliponaxis=False,
-                uid=f"label-{route_id}-{index}",
-            ))
+    # Highest priority first; among ordinary stops, preserve route order.
+    deduped_candidates.sort(key=lambda item: item["priority"])
 
     # ------------------------------------------------------------
-    # SHARED / INTERCHANGE STOPS
+    # PLACE LABELS
     # ------------------------------------------------------------
-    # One common center is kept at the true stop coordinate. Each fanned route
-    # is connected back to it. The oval surrounds the common stop and contains
-    # small route-colored indicators so the user can immediately see that the
-    # stop belongs to multiple routes.
+    for candidate in deduped_candidates:
+        label = format_stop_name(candidate["name"])
+        if not label:
+            continue
+
+        font_size = candidate.get("font_size", 10)
+        if label_width_chars(label) > 20 and font_size > 10:
+            font_size = 10
+
+        add_stop_label(
+            label,
+            candidate["lon"],
+            candidate["lat"],
+            font_size=font_size,
+            arrow_color="#666666" if candidate["priority"] < 2 else "#999999",
+        )
+
+
+    # ------------------------------------------------------------
+    # LEGEND SYMBOLS
+    # ------------------------------------------------------------
+    symbol_stop_color = ROUTE_COLOR_HEX.get(
+        route_color_map.get(next(iter(route_data), ""), "blue"), "#1d4ed8"
+    )
+
+    first_shared_colors = []
     for shared_key in shared_stops:
-        name_key, lat, lon = shared_key
-        routes_here = stop_routes[shared_key]
-        if not routes_here:
-            continue
-
-        # Recover a readable stop name from any route occurrence.
-        shared_name = name_key
-        for rid in routes_here:
-            ordered = route_data[rid]
-            for _, row in ordered.iterrows():
-                candidate = "" if pd.isna(row["stop_name"]) else str(row["stop_name"]).strip()
-                if candidate.casefold() == name_key:
-                    shared_name = candidate
-                    break
-            if shared_name != name_key:
-                break
-
-        if stop_label_name(shared_name).casefold() in hidden_label_keys:
-            continue
-
-        # Place one interchange marker on each shifted route copy. This keeps
-        # the marker physically attached to the colored line.
-        shared_points = []
-        shared_colors = []
-        for rid in routes_here:
-            draw_lons, draw_lats = draw_cache[rid]
-            ordered = route_data[rid]
-            found = None
-            for i, (_, row) in enumerate(ordered.iterrows()):
-                key = (
-                    ("" if pd.isna(row["stop_name"]) else str(row["stop_name"]).strip()).casefold(),
-                    round(float(row["stop_lat"]), 6),
-                    round(float(row["stop_lon"]), 6),
-                )
-                if key == shared_key:
-                    found = i
-                    break
-            if found is None:
-                continue
-
-            color = ROUTE_COLOR_HEX.get(
-                route_color_map.get(rid, "blue"),
-                route_color_map.get(rid, "#1d4ed8"),
+        for rid in stop_routes[shared_key]:
+            first_shared_colors.append(
+                ROUTE_COLOR_HEX.get(route_color_map.get(rid, "blue"), "#1d4ed8")
             )
-            shared_points.append((draw_lons[found], draw_lats[found]))
-            shared_colors.append(color)
+            break
+        break
+    symbol_interchange_color = (
+        first_shared_colors[0] if first_shared_colors else symbol_stop_color
+    )
 
-        if shared_points:
-            fig.add_trace(go.Scatter(
-            x=[lon],
-            y=[lat],
-            mode="markers",
-            marker=dict(
-                size=8,
-                symbol="circle",
-                color="white",
-                line=dict(color="#111111", width=2.5),
-            ),
-            hovertext=[shared_name],
-            hovertemplate="<b>%{hovertext}</b><br>Shared by "
-                          + str(len(routes_here)) + " routes<extra></extra>",
-            showlegend=False,
-                legendgroup=f"route-{routes_here[0]}",
-            cliponaxis=False,
-            uid=f"shared-center-{name_key}",
-            ))
+    # Symbols section in the same format as the LOOM legend:
+    #   Symbols
+    #   -- Route line (color = route)
+    #   o  Bus stop / station
+    #   O  Interchange (shared stop)
+    #   -- Station name (text beside a stop)
+    # 'Symbols' gets its own heading row so every symbol entry keeps
+    # its own glyph.
+    fig.add_trace(go.Scatter(
+        x=[None],
+        y=[None],
+        mode="markers",
+        marker=dict(size=1, color="rgba(0,0,0,0)", opacity=0),
+        name="<b>Symbols</b>",
+        legendgroup="symbols",
+        legend="legend2",
+        showlegend=True,
+        hoverinfo="skip",
+        uid="legend-symbol-header",
+    ))
 
-            # Data-coordinate ring stays attached to every shifted route copy
-            # when the user zooms or pans the map.
-            ring_radius = max(
-                max(
-                    math.hypot(point[0] - lon, point[1] - lat)
-                    for point in shared_points
-                ),
-                bbox_diag * 0.004,
-            )
-            ring_angles = [2 * math.pi * index / 40 for index in range(41)]
-            fig.add_trace(go.Scatter(
-                x=[lon + ring_radius * math.cos(angle) for angle in ring_angles],
-                y=[lat + ring_radius * math.sin(angle) for angle in ring_angles],
-                mode="lines",
-                line=dict(color="#111111", width=2),
-                hoverinfo="skip",
-                showlegend=False,
-                legendgroup=f"route-{routes_here[0]}",
-                cliponaxis=False,
-                uid=f"shared-ring-{name_key}",
-            ))
+    fig.add_trace(go.Scatter(
+        x=[None, None],
+        y=[None, None],
+        mode="lines",
+        line=dict(color=symbol_stop_color, width=5),
+        name="Route line (color = route)",
+        legendgroup="symbols",
+        legend="legend2",
+        showlegend=True,
+        hoverinfo="skip",
+        uid="legend-symbol-line",
+    ))
 
-        # One clean label for the interchange, horizontally beside the oval.
-        # Use the base name (no trailing number) and skip it if a label for
-        # this base name is already on the map (e.g. a nearby 'Kalanki 1'
-        # stop already labeled on one of the routes).
-        shared_base_name = stop_label_name(shared_name)
-        if (
-            label_density == "Major exchanges only"
-            and not is_major_transit_stop(shared_base_name)
-        ):
-            continue
-        if shared_base_name.casefold() in seen_base_names:
-            continue
-        seen_base_names.add(shared_base_name.casefold())
-        fig.add_trace(go.Scatter(
-            x=[lon],
-            y=[lat],
-            mode="text",
-            text=[format_stop_name(shared_base_name, max_chars=24)],
-            textposition="middle right",
-            textfont=dict(size=11, color="#111111", family="Arial, sans-serif"),
-            hoverinfo="skip",
-            showlegend=False,
-            legendgroup=f"route-{routes_here[0]}",
-            cliponaxis=False,
-            uid=f"shared-label-{name_key}",
-        ))
+    fig.add_trace(go.Scatter(
+        x=[None],
+        y=[None],
+        mode="markers",
+        marker=dict(
+            size=8,
+            symbol="circle",
+            color="white",
+            line=dict(color=symbol_stop_color, width=2.5),
+        ),
+        name="Bus stop / station",
+        legendgroup="symbols",
+        legend="legend2",
+        showlegend=True,
+        hoverinfo="skip",
+        uid="legend-symbol-stop",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=[None],
+        y=[None],
+        mode="markers",
+        marker=dict(
+            size=14,
+            symbol="circle",
+            color="white",
+            line=dict(color=symbol_interchange_color, width=2.5),
+        ),
+        name="Interchange (shared stop)",
+        legendgroup="symbols",
+        legend="legend2",
+        showlegend=True,
+        hoverinfo="skip",
+        uid="legend-symbol-interchange",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=[None, None],
+        y=[None, None],
+        mode="lines",
+        line=dict(color="rgba(0,0,0,0)", width=0.01),
+        name="Station name (text)",
+        legendgroup="symbols",
+        legend="legend2",
+        showlegend=True,
+        hoverinfo="skip",
+        uid="legend-symbol-text",
+    ))
+
+    # ------------------------------------------------------------
+    # VECTOR LANDMARKS
+    # ------------------------------------------------------------
+    add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=landmark_icon_size_deg)
 
     # ------------------------------------------------------------
     # FINAL LAYOUT
     # ------------------------------------------------------------
     lon_min, lon_max = min(map_lons), max(map_lons)
     lat_min, lat_max = min(map_lats), max(map_lats)
+
     lon_padding = max((lon_max - lon_min) * 0.36, 0.012)
     lat_padding = max((lat_max - lat_min) * 0.36, 0.012)
+
+    # ------------------------------------------------------------
+    # RIVERS (optional; painted underneath the route lines)
+    # ------------------------------------------------------------
+    if show_river:
+        add_rivers_to_transit_figure(
+            fig,
+            (lon_min - lon_padding, lon_max + lon_padding),
+            (lat_min - lat_padding, lat_max + lat_padding),
+        )
+
+    # ------------------------------------------------------------
+    # ROADS (optional; painted underneath the route lines, like rivers)
+    # ------------------------------------------------------------
+    if show_road:
+        add_roads_to_transit_figure(
+            fig,
+            (lon_min - lon_padding, lon_max + lon_padding),
+            (lat_min - lat_padding, lat_max + lat_padding),
+        )
 
     fig.update_layout(
         template="plotly_white",
@@ -1149,20 +3656,53 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
         paper_bgcolor="#ffffff",
         font=dict(color="#111111"),
         legend=dict(
-            title="Routes",
             orientation="v",
-            groupclick="togglegroup",
             bgcolor="rgba(255,255,255,0.94)",
-            bordercolor="rgba(0,0,0,0.12)",
+            bordercolor="rgba(0,0,0,0.15)",
             borderwidth=1,
             font=dict(color="#111111", size=11),
-            xref="paper", yref="paper",
-            x=1.02, y=1.0,
-            xanchor="left", yanchor="top",
+            title=dict(
+                text="<b>Routes</b>",
+                font=dict(size=12, color="#111111"),
+                side="top",
+            ),
+            xref="paper",
+            yref="paper",
+            x=0.99,
+            y=0.02,
+            xanchor="right",
+            yanchor="bottom",
+            groupclick="togglegroup",
+            itemsizing="trace",
+            tracegroupgap=2,
+        ),
+        # Symbols live in their own legend column (top-right) so the
+        # legend area reads as two columns: Routes | Symbols.
+        legend2=dict(
+            orientation="v",
+            bgcolor="rgba(255,255,255,0.94)",
+            bordercolor="rgba(0,0,0,0.15)",
+            borderwidth=1,
+            font=dict(color="#111111", size=11),
+            title=dict(
+                text="<b>Symbols</b>",
+                font=dict(size=12, color="#111111"),
+                side="top",
+            ),
+            xref="paper",
+            yref="paper",
+            x=0.99,
+            y=0.98,
+            xanchor="right",
+            yanchor="top",
+            itemsizing="trace",
+            tracegroupgap=2,
         ),
         xaxis=dict(
             visible=False,
             range=[lon_min - lon_padding, lon_max + lon_padding],
+            scaleanchor="y",
+            scaleratio=0.89,
             fixedrange=False,
             showgrid=False,
             zeroline=False,
@@ -1175,13 +3715,13 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             zeroline=False,
         ),
         autosize=True,
-        height=820,
-        margin=dict(t=85, b=45, l=35, r=245),
+        height=860,
+        margin=dict(t=90, b=45, l=45, r=45),
         hovermode="closest",
         dragmode="pan",
-        annotations=fig.layout.annotations,
         uirevision=",".join(sorted(selected_routes)),
     )
+
 
     return fig
 
@@ -1251,7 +3791,6 @@ ORDER BY duration DESC;
 # LOOM TRANSIT MAP
 # ============================================================
 
-LOOM_DIR_WSL = "/home/neetu/loom/build"
 LOOM_DIR_NATIVE = os.getenv(
     "LOOM_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "loom-binaries"),
@@ -1312,6 +3851,14 @@ def windows_path_to_wsl(path):
         return os.path.abspath(path)
     path = os.path.abspath(path)
     return f"/mnt/{path[0].lower()}{path[2:].replace(chr(92), '/') }"
+
+
+LOOM_DIR_WSL = os.getenv(
+    "LOOM_DIR_WSL",
+    windows_path_to_wsl(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "loom", "build")
+    ),
+)
 
 
 def _sql_values(values):
@@ -1564,7 +4111,8 @@ def check_loom_installation():
     if missing:
         raise RuntimeError(
             "LOOM executable(s) not found: " + ", ".join(missing) +
-            (f". Check LOOM_DIR_WSL ({LOOM_DIR_WSL})." if loom_uses_wsl()
+            (f". Check LOOM_DIR_WSL ({LOOM_DIR_WSL}); set the LOOM_DIR_WSL "
+             "environment variable to override it." if loom_uses_wsl()
              else (
                  ". Streamlit Cloud does not include the LOOM C++ binaries. "
                  f"Build them during deployment or set LOOM_DIR to a directory "
@@ -1810,6 +4358,137 @@ def remove_line_labels(svg):
 
     return ET.tostring(root, encoding='unicode')
 
+
+def orient_octilinear_labels(svg):
+    """Make station-label reading direction consistent per octilinear angle
+    family (0/45/90/135 degrees + their opposites), instead of flattening
+    or re-placing labels.
+
+    transitmap -l already picks good label *positions* on octilinear maps
+    (see generate_loom_svg's comment on why separate_station_labels() was
+    disabled) -- the problem is only which *end* of the label path LOOM
+    treats as the start. That can flip independently per stop, so two
+    labels sitting at the same visual incline (e.g. two 45-degree labels)
+    can end up reading in opposite directions, and one looks upside-down
+    or mirrored relative to the other.
+
+    This pass leaves every path's two endpoints, length and midpoint
+    untouched -- it only reverses point order (start <-> end) so that:
+      - all horizontal labels read left-to-right
+      - all vertical labels read bottom-to-top
+      - all "/" diagonal labels read bottom-left-to-top-right
+      - all "\\" diagonal labels read top-left-to-bottom-right
+    which keeps LOOM's native placement/collision-avoidance intact while
+    making same-angle labels look uniform.
+    """
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    xlink_href = '{http://www.w3.org/1999/xlink}href'
+    ns = root.tag.split('}')[0] if root.tag.startswith('{') else ''
+    text_tag = ns + '}text' if ns else 'text'
+    textpath_tag = ns + '}textPath' if ns else 'textPath'
+
+    path_map = {}
+    for el in root.iter():
+        if el.tag.rsplit('}', 1)[-1] == 'path' and el.get('id'):
+            path_map[el.get('id')] = el
+
+    for text in root.iter(text_tag):
+        if 'station-label' not in (text.get('class') or ''):
+            continue
+        for tp in text.findall(textpath_tag):
+            href = tp.get(xlink_href) or tp.get('href')
+            if not href:
+                continue
+            path_el = path_map.get(href.split('#')[-1])
+            if path_el is None:
+                continue
+
+            d = path_el.get('d') or ''
+            segs = re.findall(r'([A-Za-z])\s*(-?[\d.eE+]+)[\s,]+(-?[\d.eE+]+)', d)
+            if len(segs) < 2:
+                continue
+
+            cmds = [s[0] for s in segs]
+            pts = [(float(a), float(b)) for _, a, b in segs]
+            (x1, y1), (x2, y2) = pts[0], pts[-1]
+            dx, dy = x2 - x1, y2 - y1
+            if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+                continue
+
+            # Canonical rule: the path should point generally rightward
+            # (dx > 0). For the pure-vertical case (dx == 0) it should
+            # point upward on screen (dy < 0, since SVG y grows downward).
+            needs_flip = dx < -1e-6 or (abs(dx) <= 1e-6 and dy > 0)
+            if needs_flip:
+                rev_pts = list(reversed(pts))
+                new_d = ' '.join(
+                    f"{c} {x:.3f} {y:.3f}"
+                    for c, (x, y) in zip(cmds, rev_pts)
+                )
+                path_el.set('d', new_d)
+
+    return ET.tostring(root, encoding='unicode')
+
+
+def shorten_station_labels(svg, max_chars=24):
+    """Shorten only displayed station-label text while preserving LOOM label paths."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    def tag_local(el):
+        return el.tag.split("}")[-1] if "}" in el.tag else el.tag
+
+    def compact_name(name):
+        name = re.sub(r"\s+", " ", name).strip()
+        if len(name) <= max_chars:
+            return name
+        # Prefer the meaningful part before a descriptive suffix.
+        for sep in [",", " - ", " – ", " — ", "(", "/"]:
+            if sep in name:
+                first = name.split(sep, 1)[0].strip()
+                if len(first) >= 8:
+                    return (first[:max_chars-1].rstrip() + "…") if len(first) > max_chars else first
+        # Otherwise keep whole words and add an ellipsis.
+        out = ""
+        for word in name.split():
+            candidate = word if not out else out + " " + word
+            if len(candidate) > max_chars - 1:
+                break
+            out = candidate
+        if not out:
+            out = name[:max_chars-1].rstrip()
+        return out.rstrip(" ,-/–—") + "…"
+
+    for text_el in root.iter():
+        if tag_local(text_el) != "text" or "station-label" not in (text_el.get("class") or ""):
+            continue
+        original = "".join(text_el.itertext()).strip()
+        if not original:
+            continue
+        shortened = compact_name(original)
+        if shortened == original:
+            continue
+
+        title = ET.Element("{http://www.w3.org/2000/svg}title")
+        title.text = original
+        text_el.insert(0, title)
+
+        changed = False
+        for child in list(text_el):
+            if tag_local(child) in ("textPath", "tspan"):
+                child.text = shortened
+                changed = True
+                break
+        if not changed:
+            text_el.text = shortened
+
+    return ET.tostring(root, encoding="unicode")
 
 def separate_station_labels(svg):
     try:
@@ -2120,15 +4799,6 @@ def pad_svg_viewbox(svg, pad=150):
 # ============================================================
 # MANUAL LABEL OVERRIDES (NEW FEATURE)
 # ============================================================
-# Lets the user pick ONE bad-looking station label from the LOOM SVG and
-# nudge/rotate just that label, leaving every other label exactly as LOOM
-# rendered it. Two helpers:
-#   - get_svg_label_texts(svg): lists every station-label text + its anchor
-#     point, so the UI can offer a dropdown of "which label is wrong".
-#   - apply_manual_label_overrides(svg, overrides): wraps only the matching
-#     <text class="station-label"> (and its owned textPath <path>, if any)
-#     in its own <g transform="..."> so it can move/rotate independently.
-# ============================================================
 
 def get_svg_label_texts(svg):
     """Return [{'text', 'cx', 'cy'}] for every station-label in the SVG,
@@ -2156,6 +4826,7 @@ def get_svg_label_texts(svg):
             continue
 
         cx = cy = None
+        ends = None
         for tp in text:
             if tag_local(tp) == 'textPath':
                 href = tp.get(xlink_href) or tp.get('href')
@@ -2167,6 +4838,7 @@ def get_svg_label_texts(svg):
                         xs = [float(a) for _, a, b in segs]
                         ys = [float(b) for _, a, b in segs]
                         cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+                        ends = (xs[0], ys[0], xs[-1], ys[-1])
 
         if cx is None:
             try:
@@ -2174,7 +4846,7 @@ def get_svg_label_texts(svg):
             except (TypeError, ValueError):
                 cx, cy = 0.0, 0.0
 
-        labels.append({'text': label_text, 'cx': cx, 'cy': cy})
+        labels.append({'text': label_text, 'cx': cx, 'cy': cy, 'ends': ends})
 
     return labels
 
@@ -2238,12 +4910,25 @@ def apply_manual_label_overrides(svg, label_overrides):
             except (TypeError, ValueError):
                 pass
 
-        angle = override.get('rotate', 0)
-        dx = override.get('dx', 0)
-        dy = override.get('dy', 0)
+        angle = override.get("rotate", 0)
+        dx = override.get("dx", 0)
+        dy = override.get("dy", 0)
+        scale = float(override.get("scale", 1.0) or 1.0)
+
+        # Compose: move, rotate about the label's own centre, then scale
+        # about that same centre (the scale-about-centre sandwich keeps the
+        # label anchored where it was).
+        transform = f"translate({dx},{dy})"
+        if angle:
+            transform += f" rotate({angle} {cx:.2f} {cy:.2f})"
+        if scale != 1.0:
+            transform += (
+                f" translate({cx:.2f},{cy:.2f}) scale({scale:.3f})"
+                f" translate({-cx:.2f},{-cy:.2f})"
+            )
 
         wrapper = ET.Element(ns + 'g')
-        wrapper.set('transform', f'translate({dx},{dy}) rotate({angle} {cx:.2f} {cy:.2f})')
+        wrapper.set('transform', transform)
 
         parent.remove(text)
         wrapper.append(text)
@@ -2259,6 +4944,80 @@ def apply_manual_label_overrides(svg, label_overrides):
     return ET.tostring(root, encoding='unicode')
 
 
+def apply_landmark_overrides(svg, overrides):
+    """Apply manual landmark edits to a LOOM SVG.
+
+    overrides: {landmark_name: {'dx', 'dy', 'rot', 'scale'}} where dx/dy
+    are offsets in icon-widths. Each matching <g class="loom-landmark">
+    (which carries data-x/data-y/data-size from _svg_landmark_group) is
+    wrapped in its own transform group, so the edit is independent of
+    everything else on the map."""
+    if not overrides:
+        return svg
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    ns = root.tag.split('}')[0] + '}' if root.tag.startswith('{') else ''
+    parent_map = {c: p for p in root.iter() for c in p}
+
+    changed = False
+    for group in list(root.iter()):
+        if (group.tag.rsplit('}', 1)[-1] != 'g'
+                or 'loom-landmark' not in (group.get('class') or '')):
+            continue
+        name = html.unescape(group.get('data-landmark-name') or '')
+        override = overrides.get(name)
+        if not override:
+            continue
+        try:
+            cx = float(group.get('data-x'))
+            cy = float(group.get('data-y'))
+            size = float(group.get('data-size'))
+        except (TypeError, ValueError):
+            continue
+
+        dx = float(override.get('dx', 0) or 0) * size   # offsets in icon-widths
+        dy = float(override.get('dy', 0) or 0) * size
+        rot = float(override.get('rot', 0) or 0)
+        scale = float(override.get('scale', 1.0) or 1.0)
+
+        transform = f'translate({dx:.2f},{dy:.2f})'
+        if rot:
+            transform += f' rotate({rot:.2f} {cx:.2f} {cy:.2f})'
+        if scale != 1.0:
+            transform += (
+                f' translate({cx:.2f},{cy:.2f}) scale({scale:.3f})'
+                f' translate({-cx:.2f},{-cy:.2f})'
+            )
+
+        parent = parent_map.get(group)
+        if parent is None:
+            continue
+        wrapper = ET.Element(ns + 'g')
+        wrapper.set('transform', transform)
+        index = list(parent).index(group)
+        parent.remove(group)
+        wrapper.append(group)
+        parent.insert(index, wrapper)
+        changed = True
+
+    if not changed:
+        return svg
+    return ET.tostring(root, encoding='unicode')
+
+
+LANDMARK_LAYOUT_VERSION = "pinned-anchor-v6"  # bump when placement code changes
+
+
+def landmark_layout_signature():
+    """Changes whenever LANDMARKS is edited, so cached maps are not reused."""
+    return hashlib.md5(
+        (LANDMARK_LAYOUT_VERSION + json.dumps(LANDMARKS, sort_keys=True, default=str)).encode()
+    ).hexdigest()
+
+
 @st.cache_data(show_spinner=False)
 def generate_loom_svg(
     selected_routes_tuple,
@@ -2268,7 +5027,14 @@ def generate_loom_svg(
     line_spacing=20,
     label_pad=150,
     label_font_scale=1.0,
+    selected_landmarks=(),
+    landmark_icon_size=28,
+    show_river=False,
+    show_road=False,
+    landmark_layout_sig="",
 ):
+    # landmark_layout_sig is unused in the body; it only exists so st.cache_data
+    # re-runs when LANDMARKS (anchor/side/...) or the placement code changes.
     if not selected_routes_tuple:
         raise ValueError("Please select at least one route.")
     check_loom_installation()
@@ -2279,10 +5045,7 @@ def generate_loom_svg(
     if octi_extra_args and octi_extra_args.strip():
         octi_cmd += f" {octi_extra_args.strip()}"
 
-    # Let transitmap handle station labels natively for BOTH modes, exactly
-    # like app.py: no --station-label-textsize override, then apply app.py's
-    # post-processing pipeline (font scaling, clip expansion, label
-    # separation) to the SVG.
+
     transitmap_cmd = (
         f"{loom_dir}/transitmap -l "
         f"--line-width {line_width} --line-spacing {line_spacing}"
@@ -2310,7 +5073,70 @@ def generate_loom_svg(
         svg = bring_labels_to_front(svg)  # re-raise labels above enlarged glyphs/markers
 
     svg = remove_line_labels(svg)
-    svg = separate_station_labels(svg)
+
+    # IMPORTANT: transitmap -l already computes label paths/placement.
+    # Do not flatten/re-place station labels after transitmap has placed
+    # them. The old separate_station_labels() pass converted every label to
+    # a horizontal path and then shifted labels in data-space, which was
+    # the main cause of bad/misaligned labels on octilinear maps.
+    # Keep transitmap -l's native label geometry (position/length) intact --
+    # only normalize which direction each label path reads in, so labels
+    # sharing the same octilinear angle (0/45/90/135 degrees) all face the
+    # same way instead of some appearing upside-down/mirrored relative to
+    # others at the same incline.
+    if schematic:
+        svg = orient_octilinear_labels(svg)
+
+    # Show FULL station names: no truncation, no ellipsis. The label
+    # padding control below still protects against edge-clipping for the
+    # (now longer) full names.
+    svg = shorten_station_labels(svg, max_chars=100)
+
+    # Road layer. Same geographic-fitting mechanism as the river layer:
+    # only drawable on the non-schematic layout, inserted at the very back.
+    road_markup = ""
+    if show_road and not schematic:
+        road_paths, _road_error = load_road_paths()
+        if road_paths:
+            road_markup = build_road_svg_markup(
+                svg,
+                _collect_route_stops_with_names(selected_routes_tuple),
+                road_paths,
+                line_width=line_width,
+            )
+
+    # River layer. Geometry is fitted against the SVG exactly as LOOM drew
+    # it (before landmarks are added), but inserted after the label passes
+    # below so it stays at the very back. Geographic layout only: octi's
+    # schematic layout has no real lon/lat to place a river on.
+    river_markup = ""
+    if show_river and not schematic:
+        river_paths, _river_error = load_river_paths()
+        if river_paths:
+            river_markup = build_river_svg_markup(
+                svg,
+                _collect_route_stops_with_names(selected_routes_tuple),
+                river_paths,
+                line_width=line_width,
+            )
+
+    if selected_landmarks:
+        svg = add_landmarks_to_loom_svg(
+            svg,
+            selected_routes_tuple,
+            selected_landmarks,
+            icon_size=landmark_icon_size,
+            schematic=schematic,
+        )
+
+    # Landmarks were injected after the first bring_labels_to_front() pass,
+    # so run it again to guarantee landmark icons/labels render above the
+    # transit lines instead of the lines painting over them.
+    svg = raise_labels_above_markers(svg)
+    svg = bring_labels_to_front(svg)
+
+    svg = insert_river_markup(svg, road_markup)
+    svg = insert_river_markup(svg, river_markup)
 
     if label_pad and label_pad > 0:
         svg = pad_svg_viewbox(svg, pad=label_pad)
@@ -2324,6 +5150,259 @@ def add_route_title_to_svg(
     return svg
 
 
+def _content_y_bounds(root):
+    """Best-effort TIGHT bounding box (in the SVG's own coordinate
+    space) of everything actually drawn inside root. Returns
+    (min_x, min_y, max_x, max_y) -- the x bounds are used to crop the
+    wide empty side margins LOOM bakes into its canvas so the exported
+    PNG fills the full width, the y bounds to crop top/bottom padding.
+
+    generate_loom_svg() pads the LOOM output's viewBox by a fixed amount
+    (label_pad, 150px by default) on every side so labels near the edge
+    never clip. That's a good safety margin for a large, dense map, but
+    for a small map (few routes selected) that same fixed padding is a
+    much bigger fraction of the total height, which shows up as a big
+    empty gap above/below the map. This walks the tree and returns the
+    real min/max y of the drawn geometry so the composite can crop back
+    to it instead of trusting the padded viewBox. Returns None if it
+    can't confidently determine anything (caller then falls back to the
+    declared viewBox, so this is purely an enhancement, never required).
+    """
+    ys = []
+    xs = []
+    num_re = re.compile(r'-?\d*\.?\d+(?:[eE][-+]?\d+)?')
+    tok_re = re.compile(r'[A-Za-z]|-?\d*\.?\d+(?:[eE][-+]?\d+)?')
+    # Elements that never paint anything themselves (their geometry is only
+    # a clip/mask/pattern definition) -- counting them, or anything inside
+    # them, inflated the "content" box and left big empty margins around
+    # the exported map.
+    non_painting = {'clipPath', 'mask', 'pattern', 'marker', 'symbol',
+                    'linearGradient', 'radialGradient', 'style', 'title', 'desc'}
+    arg_count = {'M': 2, 'L': 2, 'T': 2, 'H': 1, 'V': 1,
+                 'C': 6, 'S': 4, 'Q': 4, 'A': 7}
+
+    def local(tag):
+        return tag.split('}')[-1] if '}' in tag else tag
+
+    def is_hidden(el):
+        style = (el.get('style') or '').replace(' ', '').lower()
+        return (
+            (el.get('visibility') or '').lower() == 'hidden'
+            or (el.get('display') or '').lower() == 'none'
+            or 'visibility:hidden' in style
+            or 'display:none' in style
+        )
+
+    def path_points(d):
+        """Endpoints/control points of a path, with relative commands and
+        H/V/A handled properly (the old 'every number is x,y' reading was
+        wrong for those)."""
+        toks = tok_re.findall(d or '')
+        pts = []
+        cx = cy = sx = sy = 0.0
+        cmd = None
+        i = 0
+        while i < len(toks):
+            t = toks[i]
+            if t.isalpha() and t not in ('e', 'E'):
+                cmd = t
+                i += 1
+                if cmd in 'Zz':
+                    cx, cy = sx, sy
+                continue
+            if cmd is None:
+                break
+            up = cmd.upper()
+            n = arg_count.get(up)
+            if not n or i + n > len(toks):
+                break
+            try:
+                v = [float(x) for x in toks[i:i + n]]
+            except ValueError:
+                break
+            i += n
+            rel = cmd.islower()
+            if up == 'H':
+                cx = cx + v[0] if rel else v[0]
+                pts.append((cx, cy))
+            elif up == 'V':
+                cy = cy + v[0] if rel else v[0]
+                pts.append((cx, cy))
+            else:
+                if up == 'A':
+                    pairs = [(v[5], v[6])]
+                else:
+                    pairs = [(v[k], v[k + 1]) for k in range(0, n, 2)]
+                for px, py in pairs:
+                    if rel:
+                        px, py = cx + px, cy + py
+                    pts.append((px, py))
+                cx, cy = pts[-1]
+                if up == 'M':
+                    sx, sy = cx, cy
+                    cmd = 'l' if rel else 'L'  # extra pairs are implicit lineto
+        return pts
+
+    def walk(el, tx=0.0, ty=0.0, scale=1.0, is_root=False):
+        transform = el.get('transform', '') or ''
+        for m in re.finditer(r'translate\(\s*(-?[\d.eE+]+)[ ,]+(-?[\d.eE+]+)', transform):
+            tx += float(m.group(1)) * scale
+            ty += float(m.group(2)) * scale
+        for m in re.finditer(r'scale\(\s*(-?[\d.]+)', transform):
+            scale *= float(m.group(1))
+
+        tag = local(el.tag)
+        if tag in non_painting or (not is_root and is_hidden(el)):
+            return
+        try:
+            if tag == 'svg' and not is_root:
+                # Nested <svg> (the landmark icons): its children live in the
+                # icon's OWN coordinate system (e.g. 0..512), so recursing
+                # put bogus points near the origin into the bounds. Use the
+                # icon's placed box instead and don't descend.
+                x = float(el.get('x', 0))
+                y = float(el.get('y', 0))
+                w_ = float(el.get('width', 0))
+                h_ = float(el.get('height', 0))
+                xs.extend([tx + x * scale, tx + (x + w_) * scale])
+                ys.extend([ty + y * scale, ty + (y + h_) * scale])
+                return
+            if tag == 'circle' or tag == 'ellipse':
+                cx = float(el.get('cx', 0))
+                cy = float(el.get('cy', 0))
+                r = float(el.get('rx', el.get('r', 0)))
+                ry = float(el.get('ry', el.get('r', 0)))
+                xs.append(tx + (cx - r) * scale)
+                xs.append(tx + (cx + r) * scale)
+                ys.append(ty + (cy - ry) * scale)
+                ys.append(ty + (cy + ry) * scale)
+            elif tag == 'rect' or tag == 'image':
+                x = float(el.get('x', 0))
+                y = float(el.get('y', 0))
+                w_ = float(el.get('width', 0))
+                h_ = float(el.get('height', 0))
+                xs.append(tx + x * scale)
+                xs.append(tx + (x + w_) * scale)
+                ys.append(ty + y * scale)
+                ys.append(ty + (y + h_) * scale)
+            elif tag in ('text', 'tspan'):
+                y = el.get('y')
+                x = el.get('x')
+                if y is not None:
+                    try:
+                        ys.append(ty + float(y.split(',')[0].split()[0]) * scale)
+                    except (ValueError, IndexError):
+                        pass
+                if x is not None:
+                    try:
+                        xs.append(tx + float(x.split(',')[0].split()[0]) * scale)
+                    except (ValueError, IndexError):
+                        pass
+            elif tag == 'path':
+                for px, py in path_points(el.get('d') or ''):
+                    xs.append(tx + px * scale)
+                    ys.append(ty + py * scale)
+            elif tag in ('polyline', 'polygon'):
+                nums = [float(n) for n in num_re.findall(el.get('points') or '')]
+                for i in range(0, len(nums) - 1, 2):
+                    xs.append(tx + nums[i] * scale)
+                    ys.append(ty + nums[i + 1] * scale)
+            elif tag == 'line':
+                for kx, ky in (('x1', 'y1'), ('x2', 'y2')):
+                    xs.append(tx + float(el.get(kx, 0)) * scale)
+                    ys.append(ty + float(el.get(ky, 0)) * scale)
+        except (ValueError, TypeError):
+            pass
+
+        for child in list(el):
+            walk(child, tx, ty, scale)
+
+    walk(root, is_root=True)
+    if len(ys) < 2 or len(xs) < 2:
+        return None
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def flatten_textpath_labels(svg):
+    """Turn every station-label written with <textPath> into a plain,
+    positioned + rotated <text>.
+
+    Figma, Illustrator and several other SVG importers ignore <textPath>,
+    so an exported SVG opened there shows the map with NO bus-stop names
+    (browsers render them fine, which is why the PNG looked OK). A plain
+    <text x y transform="rotate(...)"> shows up everywhere and stays
+    editable. Position/angle come from the label path LOOM already placed,
+    so the layout is unchanged. Only used for the downloaded SVG.
+    """
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+
+    def local(tag):
+        return tag.split('}')[-1] if '}' in tag else tag
+
+    xlink_href = '{http://www.w3.org/1999/xlink}href'
+    path_map = {el.get('id'): el for el in root.iter()
+                if local(el.tag) == 'path' and el.get('id')}
+    pair_re = re.compile(r'([A-Za-z])\s*(-?[\d.eE+]+)[\s,]+(-?[\d.eE+]+)')
+
+    for text in root.iter():
+        if local(text.tag) != 'text' or 'station-label' not in (text.get('class') or ''):
+            continue
+        tp = next((c for c in text if local(c.tag) == 'textPath'), None)
+        if tp is None:
+            continue
+        path_el = path_map.get(((tp.get(xlink_href) or tp.get('href')) or '').split('#')[-1])
+        if path_el is None:
+            continue
+        try:
+            pts = [(float(a), float(b)) for _, a, b in pair_re.findall(path_el.get('d') or '')]
+        except ValueError:
+            continue
+        if len(pts) < 2:
+            continue
+
+        seg = sum(math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+                  for i in range(len(pts) - 1))
+        (x0, y0), (x1, y1) = pts[0], pts[-1]
+        dx, dy = x1 - x0, y1 - y0
+        chord = math.hypot(dx, dy)
+        if chord < 1e-9:
+            continue
+        ux, uy = dx / chord, dy / chord
+        angle = math.degrees(math.atan2(dy, dx))
+
+        off = 0.0
+        so = (tp.get('startOffset') or '').strip()
+        if so:
+            try:
+                off = seg * float(so[:-1]) / 100.0 if so.endswith('%') else float(so)
+            except ValueError:
+                off = 0.0
+        x, y = x0 + ux * off, y0 + uy * off
+
+        label = ''.join(tp.itertext()).strip()
+        if not label:
+            continue
+        for child in list(text):
+            text.remove(child)
+        for attr in ('textLength', 'lengthAdjust'):
+            text.attrib.pop(attr, None)
+        for k, v in tp.attrib.items():
+            if k not in (xlink_href, 'href', 'startOffset', 'method', 'spacing') \
+                    and text.get(k) is None:
+                text.set(k, v)
+        text.text = label
+        text.set('x', f'{x:.3f}')
+        text.set('y', f'{y:.3f}')
+        rot = f'rotate({angle:.3f} {x:.3f} {y:.3f})'
+        existing = (text.get('transform') or '').strip()
+        text.set('transform', f'{existing} {rot}'.strip())
+
+    return ET.tostring(root, encoding='unicode')
+
+
 def build_composite_svg(
     svg, selected_routes, route_name_map, route_color_hex_map,
     route_agency_map=None,
@@ -2335,51 +5414,100 @@ def build_composite_svg(
     w = float(w_match.group(1)) if w_match else 1200.0
     h = float(h_match.group(1)) if h_match else 800.0
 
-    header_h = 55
-    legend_header_h = 50
-    legend_row_h = 26
-    legend_bottom_pad = 20
+    header_h = 64
+    map_legend_gap = 36
+    legend_header_h = 56
+    legend_row_h = 46
+    legend_bottom_pad = 28
+    legend_top_pad = 18
 
-    legend_groups = {}
-    for rid in selected_routes:
-        agency = (route_agency_map or {}).get(rid, "Unknown Agency")
-        legend_groups.setdefault(agency, []).append(rid)
-    legend_row_count = sum(1 + len(route_ids) for route_ids in legend_groups.values())
-    legend_h = legend_header_h + legend_row_h * max(legend_row_count, 1) + legend_bottom_pad
-    total_w = w
-    total_h = h + header_h + legend_h
+    # Symbols column: fixed-width block pinned to the right edge of the
+    # canvas, sized to comfortably fit its longest label at the enlarged
+    # font size below so the text never runs past the canvas edge and
+    # gets clipped.
+    symbol_col_w = 340
+    symbol_glyph_w = 30
+    symbol_right_margin = 30
 
-    # Inline the raw LOOM SVG directly (NOT as a base64 <image>, and NOT as
-    # a nested <svg>). Both of those approaches break in several viewers:
-    #   - base64 <image>: blank / colorless map in Inkscape, Illustrator, etc.
-    #   - nested <svg>: many standalone renderers mishandle a nested viewport
-    #     with its own viewBox, so only some layers (e.g. the routes) show.
-    # The robust approach is to FLATTEN: hoist the inner SVG's children into
-    # the composite document inside a <g>, translating by the inner viewBox
-    # origin so the map lands exactly in the map area (below the title).
+    # Column-wise legend: each ROUTE gets its own column (heading + entry),
+    # flowing left-to-right and wrapping into multiple rows of columns.
+    # Reserve the Symbols column's width so route columns never run under it.
+    legend_col_w = 195
+    total_w = max(w, 760.0)  # wide enough for legend + symbols side by side
+    route_area_w = max(total_w - 40 - symbol_col_w - 20, legend_col_w)
+    legend_cols_per_row = max(1, int(route_area_w // legend_col_w))
+    route_list = list(selected_routes)
+    legend_row_count = max(1, -(-len(route_list) // legend_cols_per_row))
+
+    symbol_row_count = 5
+
     inner_svg = None
+    vb_x, vb_y, h_eff = 0.0, 0.0, h
     try:
         inner_root = ET.fromstring(svg)
         vb = (inner_root.get('viewBox') or '').replace(',', ' ').split()
-        vb_x, vb_y = 0.0, 0.0
+        vb_x, vb_y, vb_w, vb_h = 0.0, 0.0, w, h
         if len(vb) == 4:
             try:
-                vb_x, vb_y = float(vb[0]), float(vb[1])
+                vb_x, vb_y, vb_w, vb_h = (float(v) for v in vb)
             except ValueError:
                 pass
+
+        # Crop back the fixed edge padding generate_loom_svg() baked in
+        # (see _content_y_bounds' docstring) so a small map doesn't sit
+        # inside a big empty box -- keep a modest fixed margin around the
+        # real content instead of the full, size-independent pad.
+        content_margin = 24
+        bounds = _content_y_bounds(inner_root)
+        if bounds:
+            x_min, y_min, x_max, y_max = bounds
+            new_left = max(x_min - content_margin, vb_x)
+            new_right = min(x_max + content_margin, vb_x + vb_w)
+            new_top = max(y_min - content_margin, vb_y)
+            new_bottom = min(y_max + content_margin, vb_y + vb_h)
+            if new_bottom - new_top > 80 and new_right - new_left > 80:
+                vb_x, vb_y = new_left, new_top
+                vb_w = new_right - new_left
+                vb_h = new_bottom - new_top
+            h_eff = vb_h
+        else:
+            h_eff = vb_h
+
         inner_parts = [
             ET.tostring(child, encoding='unicode')
             for child in list(inner_root)
         ]
+        # Scale the (cropped) map content so it fills the FULL canvas
+        # width -- the exported PNG then renders the map wide instead of
+        # shrinking it inside leftover side margins. Height grows with the
+        # same factor so nothing is distorted; the legend panel below is
+        # laid out using the scaled height (h_eff). Everything stays
+        # visible because we scale the whole viewBox, never clip it.
+        fit_w = max(w, 760.0)
+        fit_scale = fit_w / max(vb_w, 1.0)
+        h_eff = vb_h * fit_scale
         inner_svg = (
-            f'<g transform="translate({-vb_x:.3f},{header_h - vb_y:.3f})">'
+            f'<g transform="translate({-vb_x * fit_scale:.3f},'
+            f'{header_h - vb_y * fit_scale:.3f}) '
+            f'scale({fit_scale:.4f})">'
             + ''.join(inner_parts)
             + '</g>'
         )
     except ET.ParseError:
         inner_svg = None
+    h = h_eff
+
+    # Route columns (left) | Symbols (right). The block height is driven by
+    # whichever side is taller.
+    legend_h = (
+        legend_top_pad
+        + legend_header_h
+        + legend_row_h * max(legend_row_count, symbol_row_count)
+        + legend_bottom_pad
+    )
+    total_h = h + header_h + map_legend_gap + legend_h
+
     if not inner_svg:
-        # last-resort fallback: text surgery without viewBox compensation
         inner_open = re.search(r'<svg\b[^>]*>', svg)
         if inner_open:
             inner_content = svg[inner_open.end():].rsplit('</svg>', 1)[0]
@@ -2387,27 +5515,76 @@ def build_composite_svg(
         else:
             inner_svg = f'<g transform="translate(0,{header_h})">{svg}</g>'
 
-    legend_top = h + header_h  # y where the legend block begins
+    legend_panel_top = h + header_h + map_legend_gap
+    legend_top = legend_panel_top + legend_top_pad
+    symbol_stop_color = route_color_hex_map.get(
+        next(iter(selected_routes), ""), "#1d4ed8"
+    )
+
+    # Vertical divider between the Routes columns and the Symbols column.
+    divider_x = total_w - symbol_col_w - 20
+
+    sym_top = legend_top + legend_header_h
+    sym_x_glyph = total_w - symbol_right_margin - symbol_col_w + symbol_glyph_w
+    sym_x_text = sym_x_glyph + symbol_glyph_w
+    # "Symbols" heading sits in the same header row as "Routes" (which is
+    # drawn further below), so both columns start at the same height.
+    symbol_rows_svg = (
+        f'<text x="{sym_x_glyph}" y="{legend_top + 28}" '
+        f'font-family="Arial, sans-serif" font-size="19" font-weight="700" '
+        f'fill="#111111">Symbols</text>'
+        # route line
+        f'<rect x="{sym_x_glyph}" y="{sym_top + 20}" width="20" height="5" '
+        f'fill="{symbol_stop_color}"/>'
+        f'<text x="{sym_x_text}" y="{sym_top + 27}" '
+        f'font-family="Arial, sans-serif" font-size="15" fill="#111111">'
+        f'Route line (color = route)</text>'
+        # bus stop
+        f'<circle cx="{sym_x_glyph + 10}" cy="{sym_top + 55}" r="4.5" '
+        f'fill="#ffffff" stroke="{symbol_stop_color}" stroke-width="2.5"/>'
+        f'<text x="{sym_x_text}" y="{sym_top + 60}" '
+        f'font-family="Arial, sans-serif" font-size="15" fill="#111111">'
+        f'Bus stop / station</text>'
+        # interchange
+        f'<circle cx="{sym_x_glyph + 10}" cy="{sym_top + 87}" r="8" '
+        f'fill="#ffffff" stroke="{symbol_stop_color}" stroke-width="2.5"/>'
+        f'<text x="{sym_x_text}" y="{sym_top + 92}" '
+        f'font-family="Arial, sans-serif" font-size="15" fill="#111111">'
+        f'Interchange (shared stop)</text>'
+        # station name text
+        f'<text x="{sym_x_text}" y="{sym_top + 119}" '
+        f'font-family="Arial, sans-serif" font-size="15" fill="#111111">'
+        f'Text beside a stop = stop name</text>'
+    )
+
+    def _fit_svg_text(text, max_w_px, font_px=14):
+        """Truncate text with an ellipsis so it fits max_w_px at font_px.
+        Arial averages ~0.52*font_px per character; estimate conservatively
+        (0.58) to leave a safety margin between columns."""
+        text = str(text)
+        max_chars = max(4, int(max_w_px / (font_px * 0.58)))
+        if len(text) <= max_chars:
+            return html.escape(text)
+        return html.escape(text[: max_chars - 1].rstrip() + "…")
+
     legend_items_svg = []
-    row_index = 0
-    for agency, route_ids in legend_groups.items():
-        y = legend_top + legend_header_h + row_index * legend_row_h
+    for idx, rid in enumerate(route_list):
+        col = idx % legend_cols_per_row
+        row = idx // legend_cols_per_row
+        x = 20 + col * legend_col_w
+        y = legend_top + legend_header_h + row * legend_row_h
+        color = route_color_hex_map.get(rid, "#1d4ed8")
+        agency = (route_agency_map or {}).get(rid, "Unknown Agency")
+        name = str(route_name_map.get(rid, rid))
         legend_items_svg.append(
-            f'<text x="20" y="{y - 4}" font-family="Arial, sans-serif" '
-            f'font-size="13" font-weight="700" fill="#111111">'
-            f'{html.escape(str(agency))}</text>'
+            f'<text x="{x}" y="{y - 4}" font-family="Arial, sans-serif" '
+            f'font-size="13" font-weight="700" fill="#374151">'
+            f'{_fit_svg_text(agency, legend_col_w - 8, 13)}</text>'
+            f'<rect x="{x}" y="{y + 10}" width="20" height="5" fill="{color}"/>'
+            f'<text x="{x + 28}" y="{y + 18}" font-family="Arial, sans-serif" '
+            f'font-size="15" font-weight="400" fill="#111111">'
+            f'{_fit_svg_text(name, legend_col_w - 36, 15)}</text>'
         )
-        row_index += 1
-        for rid in route_ids:
-            y = legend_top + legend_header_h + row_index * legend_row_h
-            color = route_color_hex_map.get(rid, "#1d4ed8")
-            name = html.escape(str(route_name_map.get(rid, rid)))
-            legend_items_svg.append(
-                f'<rect x="34" y="{y - 10}" width="18" height="5" fill="{color}"/>'
-                f'<text x="60" y="{y - 4}" font-family="Arial, sans-serif" '
-                f'font-size="13" fill="#111111">{name}</text>'
-            )
-            row_index += 1
     legend_svg = "".join(legend_items_svg)
 
     escaped_title = html.escape(title_text)
@@ -2415,49 +5592,802 @@ def build_composite_svg(
     return f'''<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
      width="{total_w}" height="{total_h}" viewBox="0 0 {total_w} {total_h}">
   <rect x="0" y="0" width="{total_w}" height="{total_h}" fill="#ffffff"/>
-  <text x="{total_w / 2}" y="{header_h / 2 + 8}" text-anchor="middle"
-        font-family="Arial, sans-serif" font-size="24" font-weight="700"
+  <text x="{total_w / 2}" y="{header_h / 2 + 15}" text-anchor="middle"
+        font-family="Arial, sans-serif" font-size="44" font-weight="700"
         fill="#111111">{escaped_title}</text>
   {inner_svg}
-  <text x="20" y="{legend_top + 24}" font-family="Arial, sans-serif"
-        font-size="14" font-weight="700" fill="#111111">Routes</text>
+  <line x1="0" y1="{h + header_h + map_legend_gap / 2:.1f}"
+        x2="{total_w}" y2="{h + header_h + map_legend_gap / 2:.1f}"
+        stroke="#e5e7eb" stroke-width="1"/>
+  <rect x="0" y="{legend_panel_top:.1f}" width="{total_w}"
+        height="{legend_h}" fill="#fafafa"/>
+  <text x="20" y="{legend_top + 28}" font-family="Arial, sans-serif"
+        font-size="19" font-weight="700" fill="#111111">Routes</text>
   {legend_svg}
+  <line x1="{divider_x}" y1="{legend_panel_top + 12:.1f}"
+        x2="{divider_x}" y2="{legend_panel_top + legend_h - 12:.1f}"
+        stroke="#e0e0e0" stroke-width="1"/>
+  {symbol_rows_svg}
 </svg>'''
 
 
-def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None):
-    # Downloads export the BARE LOOM transit map (no title / no legend),
-    # exactly the map shown on screen. The composite with title+legend is
-    # no longer used for exports.
-    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
-    composite_b64 = encoded
+# =========================================================
+# EDIT MODE (in-browser): move / rotate / resize labels and icons
+# Shared side-panel + one controller each for the LOOM SVG viewer and
+# the Plotly transit map. Plain strings (not f-strings) on purpose.
+# =========================================================
+EDIT_PANEL_JS = r'''function createEditPanel(afterEl, h) {
+  var p = document.createElement('div');
+  p.className = 'map-edit-panel';
+  p.style.cssText = 'display:none;flex-wrap:wrap;gap:8px 14px;align-items:center;padding:7px 10px;' +
+    'background:#eef4ff;border-bottom:1px solid #c7d7f5;font:12px Arial,sans-serif;color:#1f2937;';
+  var btn = 'padding:3px 9px;cursor:pointer;border-radius:6px;border:1px solid #bbb;background:#fff;';
+  p.innerHTML =
+    '<b style="color:#1d4ed8">Edit mode</b>' +
+    '<span class="ed-msg" style="color:#4b5563;max-width:340px"></span>' +
+    '<label style="display:flex;align-items:center;gap:5px">Size' +
+      '<input class="ed-scale" type="range" min="0.3" max="4" step="0.05" value="1" style="width:110px">' +
+      '<span class="ed-scale-v" style="min-width:38px">100%</span></label>' +
+    '<label style="display:flex;align-items:center;gap:5px">Rotate' +
+      '<input class="ed-rot" type="range" min="-180" max="180" step="1" value="0" style="width:120px">' +
+      '<input class="ed-rot-n" type="number" min="-180" max="180" step="1" value="0" style="width:54px"> deg</label>' +
+    '<span class="ed-coords" style="display:none;align-items:center;gap:6px;flex-wrap:wrap;padding:3px 8px;background:#fff;border:1px solid #c7d7f5;border-radius:6px;">' +
+      '\uD83D\uDCCD Lat <b class="ed-lat" style="font-family:monospace"></b>' +
+      ' Lon <b class="ed-lon" style="font-family:monospace"></b>' +
+      '<button class="ed-c-lat" style="' + btn + '">Copy Lat</button>' +
+      '<button class="ed-c-lon" style="' + btn + '">Copy Lon</button>' +
+      '<button class="ed-c-both" style="' + btn + '">Copy Lat/Lon</button>' +
+      '<span class="ed-c-ok" style="color:#15803d;min-width:48px"></span></span>' +
+    '<button class="ed-b-item" style="' + btn + '">Reset item</button>' +
+    '<button class="ed-b-all" style="' + btn + '">Reset all</button>' +
+    '<button class="ed-b-done" style="' + btn + 'background:#1d4ed8;color:#fff;border-color:#1d4ed8">Done</button>';
+  afterEl.insertAdjacentElement('afterend', p);
+  function q(c) { return p.querySelector(c); }
+  var scale = q('.ed-scale'), scaleV = q('.ed-scale-v'), rot = q('.ed-rot'), rotN = q('.ed-rot-n'), msg = q('.ed-msg');
+  var HINT = 'Click a label or icon, then drag it. Arrow keys nudge, + / - resize, [ ] rotate.';
+  function enable(on) {
+    [scale, rot, rotN, q('.ed-b-item')].forEach(function (e) { e.disabled = !on; });
+  }
+  scale.addEventListener('input', function () {
+    scaleV.textContent = Math.round(scale.value * 100) + '%';
+    h.onScale(parseFloat(scale.value));
+  });
+  rot.addEventListener('input', function () { rotN.value = rot.value; h.onRot(parseFloat(rot.value)); });
+  rotN.addEventListener('change', function () {
+    var v = Math.max(-180, Math.min(180, parseFloat(rotN.value) || 0));
+    rotN.value = v; rot.value = v; h.onRot(v);
+  });
+  var coordsEl = q('.ed-coords'), latEl = q('.ed-lat'), lonEl = q('.ed-lon'), okEl = q('.ed-c-ok');
+  var curLat = null, curLon = null;
+  function copyText(t) {
+    var done = function () { okEl.textContent = 'Copied \u2713'; setTimeout(function () { okEl.textContent = ''; }, 1500); };
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = t; ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { okEl.textContent = 'Copy failed'; }
+      document.body.removeChild(ta);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, fallback);
+    else fallback();
+  }
+  q('.ed-c-lat').addEventListener('click', function () { if (curLat != null) copyText(curLat); });
+  q('.ed-c-lon').addEventListener('click', function () { if (curLon != null) copyText(curLon); });
+  q('.ed-c-both').addEventListener('click', function () { if (curLat != null) copyText(curLat + ', ' + curLon); });
+  q('.ed-b-item').addEventListener('click', function () { h.onResetItem(); });
+  q('.ed-b-all').addEventListener('click', function () { h.onResetAll(); });
+  q('.ed-b-done').addEventListener('click', function () { h.onDone(); });
+  enable(false); msg.textContent = HINT;
+  return {
+    el: p,
+    show: function (on) { p.style.display = on ? 'flex' : 'none'; },
+    setCoords: function (lat, lon) {
+      if (lat == null) { coordsEl.style.display = 'none'; curLat = curLon = null; return; }
+      curLat = lat.toFixed(6); curLon = lon.toFixed(6);
+      latEl.textContent = curLat; lonEl.textContent = curLon;
+      coordsEl.style.display = 'flex';
+    },
+    set: function (name, s, r) {
+      if (name == null) { enable(false); msg.textContent = HINT; return; }
+      enable(true);
+      msg.innerHTML = 'Selected: <b></b>';
+      msg.firstElementChild.textContent = name;
+      scale.value = s; scaleV.textContent = Math.round(s * 100) + '%';
+      rot.value = r; rotN.value = Math.round(r);
+    }
+  };
+}
+'''
+
+LOOM_EDIT_JS = r'''(function () {
+  var KEY = 'loomEdits:__EDIT_KEY__';
+  var NS = 'http://www.w3.org/2000/svg';
+  var host = document.getElementById('loom-img');
+  var svg = host ? host.querySelector('svg') : null;
+  var toolbar = document.getElementById('loom-toolbar');
+  if (!host || !svg || !toolbar || typeof createEditPanel !== 'function') return;
+
+  var st = document.createElement('style');
+  st.textContent =
+    '#loom-img.ed-on text.station-label, #loom-img.ed-on g.loom-landmark {cursor:move !important; pointer-events:all !important;}' +
+    '#loom-img.ed-on text.station-label:hover {fill:#2563eb;}' +
+    '#loom-img.ed-on g.loom-landmark:hover {opacity:0.75;}';
+  document.head.appendChild(st);
+
+  var items = [], byEl = new Map(), sel = null, drag = null, editOn = false;
+
+  function mk(kind, idx, el, name) {
+    var it = {kind: kind, idx: idx, el: el, name: name, wrap: null, rect: null,
+              cx: 0, cy: 0, bw: 0, bh: 0, st: {dx: 0, dy: 0, rot: 0, scale: 1}};
+    items.push(it); byEl.set(el, it);
+  }
+  Array.prototype.forEach.call(svg.querySelectorAll('text.station-label'), function (el, i) {
+    mk('label', i, el, (el.textContent || '').replace(/\s+/g, ' ').trim());
+  });
+  Array.prototype.forEach.call(svg.querySelectorAll('g.loom-landmark'), function (el, i) {
+    mk('landmark', i, el, el.getAttribute('data-landmark-name') || 'Landmark');
+  });
+
+  function isChanged(it) { var s = it.st; return !!(s.dx || s.dy || s.rot || s.scale !== 1); }
+
+  function ensureWrap(it) {
+    if (it.wrap || !it.el.parentNode) return;
+    var w = document.createElementNS(NS, 'g');
+    w.setAttribute('class', 'ed-wrap');
+    it.el.parentNode.insertBefore(w, it.el);
+    w.appendChild(it.el);
+    it.wrap = w;
+    if (it.kind === 'landmark') {
+      it.cx = parseFloat(it.el.getAttribute('data-x')) || 0;
+      it.cy = parseFloat(it.el.getAttribute('data-y')) || 0;
+      it.bw = it.bh = (parseFloat(it.el.getAttribute('data-size')) || 28) * 1.1;
+    } else {
+      var b = w.getBBox();
+      it.cx = b.x + b.width / 2; it.cy = b.y + b.height / 2;
+      it.bw = b.width + 6; it.bh = b.height + 4;
+    }
+  }
+
+  function tf(it) {
+    var s = it.st, t = 'translate(' + s.dx + ' ' + s.dy + ')';
+    if (s.rot) t += ' rotate(' + s.rot + ' ' + it.cx + ' ' + it.cy + ')';
+    if (s.scale !== 1) t += ' translate(' + it.cx + ' ' + it.cy + ') scale(' + s.scale + ') translate(' + (-it.cx) + ' ' + (-it.cy) + ')';
+    return t;
+  }
+  function apply(it) { if (it.wrap) it.wrap.setAttribute('transform', tf(it)); }
+
+  function save() {
+    try {
+      var o = {}, n = 0;
+      items.forEach(function (it) { if (isChanged(it)) { o[it.kind + ':' + it.idx] = {n: it.name, st: it.st}; n++; } });
+      if (n) localStorage.setItem(KEY, JSON.stringify(o)); else localStorage.removeItem(KEY);
+    } catch (e) {}
+  }
+  function load() {
+    try {
+      var raw = localStorage.getItem(KEY); if (!raw) return;
+      var o = JSON.parse(raw);
+      items.forEach(function (it) {
+        var v = o[it.kind + ':' + it.idx];
+        if (v && v.n === it.name && v.st) { ensureWrap(it); Object.assign(it.st, v.st); apply(it); }
+      });
+    } catch (e) {}
+  }
+
+  function clearSel() {
+    if (sel && sel.rect && sel.rect.parentNode) sel.rect.parentNode.removeChild(sel.rect);
+    if (sel) sel.rect = null;
+  }
+  function select(it) {
+    clearSel(); sel = it || null;
+    if (!sel) { panel.set(null); return; }
+    ensureWrap(sel);
+    var r = document.createElementNS(NS, 'rect');
+    r.setAttribute('x', sel.cx - sel.bw / 2); r.setAttribute('y', sel.cy - sel.bh / 2);
+    r.setAttribute('width', sel.bw); r.setAttribute('height', sel.bh);
+    r.setAttribute('fill', 'rgba(37,99,235,0.08)'); r.setAttribute('stroke', '#2563eb');
+    r.setAttribute('stroke-width', '1.5'); r.setAttribute('stroke-dasharray', '5 3');
+    r.setAttribute('class', 'ed-sel-rect'); r.setAttribute('vector-effect', 'non-scaling-stroke'); r.setAttribute('pointer-events', 'none');
+    sel.wrap.appendChild(r); sel.rect = r;
+    panel.set(sel.name, sel.st.scale, sel.st.rot);
+  }
+
+  var panel = createEditPanel(toolbar, {
+    onScale: function (v) { if (sel) { sel.st.scale = v; apply(sel); save(); } },
+    onRot: function (v) { if (sel) { sel.st.rot = v; apply(sel); save(); } },
+    onResetItem: function () { if (sel) { sel.st = {dx: 0, dy: 0, rot: 0, scale: 1}; apply(sel); panel.set(sel.name, 1, 0); save(); } },
+    onResetAll: function () {
+      items.forEach(function (it) { it.st = {dx: 0, dy: 0, rot: 0, scale: 1}; apply(it); });
+      if (sel) panel.set(sel.name, 1, 0);
+      save();
+    },
+    onDone: function () { window.loomEditToggle(); }
+  });
+
+  function toLocal(it, e) {
+    var pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+    var m = it.wrap.parentNode.getScreenCTM();
+    return m ? pt.matrixTransform(m.inverse()) : {x: 0, y: 0};
+  }
+  function itemAt(target) {
+    var el = target && target.closest ? target.closest('text.station-label, g.loom-landmark') : null;
+    return el ? byEl.get(el) : null;
+  }
+
+  // Capture phase: runs before the viewer's own pan handler, so dragging an
+  // item moves the item and dragging empty map space still pans the map.
+  host.addEventListener('pointerdown', function (e) {
+    if (!editOn) return;
+    var it = itemAt(e.target);
+    if (!it) { select(null); return; }
+    e.stopPropagation(); e.preventDefault();
+    select(it);
+    var p = toLocal(it, e);
+    drag = {it: it, px: p.x, py: p.y, dx0: it.st.dx, dy0: it.st.dy, id: e.pointerId};
+    try { host.setPointerCapture(e.pointerId); } catch (err) {}
+  }, true);
+  host.addEventListener('pointermove', function (e) {
+    if (!drag) return;
+    e.stopPropagation(); e.preventDefault();
+    var p = toLocal(drag.it, e);
+    drag.it.st.dx = drag.dx0 + (p.x - drag.px);
+    drag.it.st.dy = drag.dy0 + (p.y - drag.py);
+    apply(drag.it);
+  }, true);
+  function endDrag(e) {
+    if (!drag) return;
+    e.stopPropagation();
+    try { host.releasePointerCapture(drag.id); } catch (err) {}
+    drag = null; save();
+  }
+  host.addEventListener('pointerup', endDrag, true);
+  host.addEventListener('pointercancel', endDrag, true);
+
+  document.addEventListener('keydown', function (e) {
+    if (!editOn || !sel) return;
+    var step = e.shiftKey ? 10 : 1, k = e.key, used = true;
+    if (k === 'ArrowLeft') sel.st.dx -= step;
+    else if (k === 'ArrowRight') sel.st.dx += step;
+    else if (k === 'ArrowUp') sel.st.dy -= step;
+    else if (k === 'ArrowDown') sel.st.dy += step;
+    else if (k === '+' || k === '=') sel.st.scale = Math.min(4, +(sel.st.scale + 0.05).toFixed(2));
+    else if (k === '-' || k === '_') sel.st.scale = Math.max(0.3, +(sel.st.scale - 0.05).toFixed(2));
+    else if (k === '[') sel.st.rot = Math.max(-180, sel.st.rot - 5);
+    else if (k === ']') sel.st.rot = Math.min(180, sel.st.rot + 5);
+    else if (k === 'Escape') { select(null); return; }
+    else used = false;
+    if (!used) return;
+    e.preventDefault(); apply(sel); panel.set(sel.name, sel.st.scale, sel.st.rot); save();
+  });
+
+  window.loomEditToggle = function () {
+    editOn = !editOn;
+    host.classList.toggle('ed-on', editOn);
+    panel.show(editOn);
+    var b = document.getElementById('loom-edit-btn');
+    if (b) b.textContent = editOn ? '\u2705 Editing' : '\u270F\uFE0F Edit';
+    if (!editOn) select(null);
+    if (typeof loomFitContainer === 'function') requestAnimationFrame(loomFitContainer);
+  };
+
+  // Re-apply the user's edits to an exported SVG string (download SVG / PNG).
+  window.loomEditHasChanges = function () { return items.some(isChanged); };
+  window.loomEditApplyToSvgText = function (text) {
+    var changed = items.filter(isChanged);
+    if (!changed.length) return text;
+    var doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+    if (doc.querySelector('parsererror')) return text;
+    var labels = Array.prototype.slice.call(doc.querySelectorAll('text.station-label'));
+    var lms = Array.prototype.slice.call(doc.querySelectorAll('g.loom-landmark'));
+    var used = new Set();
+    function txt(el) { return (el.textContent || '').replace(/\s+/g, ' ').trim(); }
+    changed.forEach(function (it) {
+      var pool = it.kind === 'label' ? labels : lms;
+      var el = pool[it.idx];
+      if (it.kind === 'label' && (!el || used.has(el) || txt(el) !== it.name)) {
+        el = pool.filter(function (l) { return !used.has(l) && txt(l) === it.name; })[0];
+      }
+      if (!el || !el.parentNode) return;
+      used.add(el);
+      var w = doc.createElementNS(NS, 'g');
+      w.setAttribute('transform', tf(it));
+      el.parentNode.insertBefore(w, el); w.appendChild(el);
+    });
+    return new XMLSerializer().serializeToString(doc);
+  };
+
+  load();
+})();
+'''
+
+TRANSIT_EDIT_JS = r'''(function () {
+  var KEY = 'transitEdits:__EDIT_KEY__';
+  var PADF = 1.42;   // icon images carry padding so rotated corners never clip
+  var gd = document.getElementById('transit-plot-div');
+  var cont = document.getElementById('transit-plot-container');
+  var toolbar = document.getElementById('transit-toolbar');
+  if (!gd || !cont || !toolbar || typeof createEditPanel !== 'function') return;
+
+  var overlay = document.createElement('div');
+  overlay.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;z-index:4;pointer-events:none;display:none;overflow:hidden;';
+  cont.appendChild(overlay);
+
+  var editOn = false, sel = null, drag = null, handles = {}, iconsReady = false, rafId = 0;
+  var annSt = {}, annBase = {}, icons = [];
+
+  function F() { return gd._fullLayout; }
+  function dflt() { return {dx: 0, dy: 0, rot: 0, scale: 1}; }
+  function isEditAnn(a) { return a && a.showarrow === false && a.xref === 'x' && a.yref === 'y' && a.text; }
+  function plain(t) { return String(t || '').replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]*>/g, '').trim(); }
+  function changed(s) { return !!(s.dx || s.dy || s.rot || s.scale !== 1); }
+
+  // ---- annotations (station labels) --------------------------------------
+  function annBaseOf(i) {
+    if (!annBase[i]) {
+      var a = gd.layout.annotations[i];
+      annBase[i] = {xs: a.xshift || 0, ys: a.yshift || 0, ang: a.textangle || 0,
+                    size: (a.font && a.font.size) || 12};
+    }
+    return annBase[i];
+  }
+  function annStOf(i) { return annSt[i] || (annSt[i] = dflt()); }
+  function annUpdate(i) {
+    var b = annBaseOf(i), s = annStOf(i), o = {}, p = 'annotations[' + i + '].';
+    o[p + 'xshift'] = b.xs + s.dx;
+    o[p + 'yshift'] = b.ys - s.dy;
+    o[p + 'textangle'] = b.ang + s.rot;
+    o[p + 'font.size'] = Math.max(2, b.size * s.scale);
+    return o;
+  }
+
+  // ---- landmark icons (layout images) ------------------------------------
+  function initIcons() {
+    if (icons.length) return;
+    var m = (gd.layout && gd.layout.meta) || {};
+    (m.landmarks || []).forEach(function (lm) { icons.push({m: lm, st: dflt(), idx: null}); });
+  }
+  function iconUri(m, rot) {
+    // Reuse the exact image already on the map (same artwork + grey tint) so the
+    // editable copy looks identical to the normal view. Built-in shapes (no custom
+    // SVG, so no image_index) fall back to the generated vector body.
+    var src = null;
+    if (m.image_index != null) {
+      var orig = (gd.layout.images || [])[m.image_index];
+      if (orig && orig.source) src = orig.source;
+    }
+    var inner = src
+      ? '<image href="' + src + '" x="10" y="10" width="80" height="80" preserveAspectRatio="xMidYMid meet"/>'
+      : m.body;
+    var s = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="-21 -21 142 142">' +
+            '<g transform="rotate(' + rot + ' 50 50)">' + inner + '</g></svg>';
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(s);
+  }
+  function imgSpec(ic) {
+    var m = ic.m, s = ic.st, f = s.scale * PADF;
+    return {source: iconUri(m, s.rot), xref: 'x', yref: 'y', x: m.lon + s.dx, y: m.lat + s.dy,
+            xanchor: 'center', yanchor: 'middle', sizex: m.sizex * f, sizey: m.sizey * f,
+            sizing: 'contain', layer: 'above', opacity: 1};
+  }
+  // Swap the static icons for editable copies (once). Originals are hidden.
+  function ensureIcons() {
+    initIcons();
+    if (iconsReady || !icons.length) return Promise.resolve();
+    iconsReady = true;
+    var imgs = (gd.layout.images || []).map(function (i) { return Object.assign({}, i); });
+    var upd = {};
+    icons.forEach(function (ic) {
+      var m = ic.m;
+      if (m.image_index != null && imgs[m.image_index]) imgs[m.image_index].visible = false;
+      if (m.leader_index != null) upd['shapes[' + m.leader_index + '].visible'] = false;
+      imgs.push(imgSpec(ic)); ic.idx = imgs.length - 1;
+    });
+    upd.images = imgs;
+    return Plotly.relayout(gd, upd);
+  }
+
+  // ---- persistence --------------------------------------------------------
+  function save() {
+    try {
+      var a = {}, l = {}, n = 0;
+      Object.keys(annSt).forEach(function (i) { if (changed(annSt[i])) { a[i] = annSt[i]; n++; } });
+      icons.forEach(function (ic) { if (changed(ic.st)) { l[ic.m.name] = ic.st; n++; } });
+      if (n) localStorage.setItem(KEY, JSON.stringify({a: a, l: l})); else localStorage.removeItem(KEY);
+    } catch (e) {}
+  }
+  function applySaved() {
+    var o = null;
+    try { o = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) {}
+    if (!o) return;
+    var upd = {}, anyIcon = false;
+    Object.keys(o.a || {}).forEach(function (i) {
+      var a = gd.layout.annotations[i];
+      if (isEditAnn(a)) { annSt[i] = Object.assign(dflt(), o.a[i]); Object.assign(upd, annUpdate(i)); }
+    });
+    initIcons();
+    icons.forEach(function (ic) {
+      if (o.l && o.l[ic.m.name]) { ic.st = Object.assign(dflt(), o.l[ic.m.name]); anyIcon = true; }
+    });
+    var p = Object.keys(upd).length ? Plotly.relayout(gd, upd) : Promise.resolve();
+    if (anyIcon) p.then(ensureIcons);
+  }
+
+  // ---- selection / commit -------------------------------------------------
+  function stOf(s) { return s.t === 'a' ? annStOf(s.i) : icons[s.i].st; }
+  function nameOf(s) { return s.t === 'a' ? plain(gd.layout.annotations[s.i].text) : icons[s.i].m.name; }
+  function styleSel() {
+    Object.keys(handles).forEach(function (k) {
+      var on = sel && (sel.t + sel.i) === k, d = handles[k];
+      d.style.border = on ? '2px solid #2563eb' : '1px dashed rgba(37,99,235,.45)';
+      d.style.background = on ? 'rgba(37,99,235,.10)' : 'transparent';
+    });
+  }
+  // Icon position is stored in map data coordinates (x = longitude, y = latitude).
+  function showCoords(extraDx, extraDy) {
+    if (!sel || sel.t !== 'i') { panel.setCoords(null); return; }
+    var ic = icons[sel.i];
+    panel.setCoords(ic.m.lat + ic.st.dy + (extraDy || 0), ic.m.lon + ic.st.dx + (extraDx || 0));
+  }
+  function select(t, i) {
+    sel = t ? {t: t, i: i} : null;
+    if (sel) { var s = stOf(sel); panel.set(nameOf(sel), s.scale, s.rot); } else panel.set(null);
+    showCoords();
+    styleSel();
+  }
+  function commit(t, i) {
+    if (t === 'a') return Plotly.relayout(gd, annUpdate(i));
+    return ensureIcons().then(function () {
+      var o = {}; o['images[' + icons[i].idx + ']'] = imgSpec(icons[i]);
+      return Plotly.relayout(gd, o);
+    });
+  }
+  var pending = false;
+  function commitSel() {
+    if (pending) return; pending = true;
+    requestAnimationFrame(function () { pending = false; if (sel) commit(sel.t, sel.i); save(); });
+  }
+  function resetOne(t, i) {
+    if (t === 'a') annSt[i] = dflt(); else icons[i].st = dflt();
+  }
+
+  var panel = createEditPanel(toolbar, {
+    onScale: function (v) { if (sel) { stOf(sel).scale = v; commitSel(); } },
+    onRot: function (v) { if (sel) { stOf(sel).rot = v; commitSel(); } },
+    onResetItem: function () {
+      if (!sel) return;
+      resetOne(sel.t, sel.i); panel.set(nameOf(sel), 1, 0); showCoords(); commitSel();
+    },
+    onResetAll: function () {
+      var upd = {};
+      Object.keys(annSt).forEach(function (i) { annSt[i] = dflt(); Object.assign(upd, annUpdate(i)); });
+      icons.forEach(function (ic) {
+        ic.st = dflt();
+        if (ic.idx != null) upd['images[' + ic.idx + ']'] = imgSpec(ic);
+      });
+      if (sel) { panel.set(nameOf(sel), 1, 0); showCoords(); }
+      if (Object.keys(upd).length) Plotly.relayout(gd, upd);
+      save();
+    },
+    onDone: function () { window.transitEditToggle(); }
+  });
+
+  // ---- overlay handles ----------------------------------------------------
+  function addHandle(t, i, l, tp, w, h, rot) {
+    var W = Math.max(w, 18), H = Math.max(h, 16);
+    l -= (W - w) / 2; tp -= (H - h) / 2;
+    var d = document.createElement('div');
+    d.style.cssText = 'position:absolute;pointer-events:auto;cursor:move;box-sizing:border-box;border-radius:3px;touch-action:none;' +
+      'left:' + l + 'px;top:' + tp + 'px;width:' + W + 'px;height:' + H + 'px;' +
+      (rot ? 'transform:rotate(' + rot + 'deg);' : '');
+    handles[t + i] = d;
+    d.addEventListener('pointerdown', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      select(t, i);
+      drag = {t: t, i: i, d: d, x0: e.clientX, y0: e.clientY, l0: l, t0: tp, id: e.pointerId};
+      try { d.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+    d.addEventListener('pointermove', function (e) {
+      if (!drag || drag.d !== d) return;
+      d.style.left = (drag.l0 + e.clientX - drag.x0) + 'px';
+      d.style.top = (drag.t0 + e.clientY - drag.y0) + 'px';
+      if (drag.t === 'i') {   // live lat/lon while dragging
+        var xa = F().xaxis, ya = F().yaxis;
+        showCoords((e.clientX - drag.x0) / (xa.l2p(1) - xa.l2p(0)),
+                   (e.clientY - drag.y0) / (ya.l2p(1) - ya.l2p(0)));
+      }
+    });
+    function up(e) {
+      if (!drag || drag.d !== d) return;
+      var dx = e.clientX - drag.x0, dy = e.clientY - drag.y0, dr = drag;
+      drag = null;
+      try { d.releasePointerCapture(dr.id); } catch (err) {}
+      if (Math.abs(dx) + Math.abs(dy) < 2) { d.style.left = dr.l0 + 'px'; d.style.top = dr.t0 + 'px'; return; }
+      if (dr.t === 'a') {
+        var s = annStOf(dr.i); s.dx += dx; s.dy += dy;
+      } else {
+        var xa = F().xaxis, ya = F().yaxis, ic = icons[dr.i];
+        ic.st.dx += dx / (xa.l2p(1) - xa.l2p(0));
+        ic.st.dy += dy / (ya.l2p(1) - ya.l2p(0));   // signed: screen-down = lat-down
+      }
+      showCoords();
+      commit(dr.t, dr.i).then(function () { save(); schedule(); });
+    }
+    d.addEventListener('pointerup', up);
+    d.addEventListener('pointercancel', up);
+    overlay.appendChild(d);
+  }
+
+  function refresh() {
+    if (!editOn || drag) return;
+    overlay.innerHTML = ''; handles = {};
+    var L = F(); if (!L || !L.xaxis || !L.yaxis) return;
+    var xa = L.xaxis, ya = L.yaxis;
+    var cr = cont.getBoundingClientRect(), gr = gd.getBoundingClientRect();
+    var ox = gr.left - cr.left, oy = gr.top - cr.top;
+    Array.prototype.forEach.call(gd.querySelectorAll('g.annotation'), function (g) {
+      var i = parseInt(g.getAttribute('data-index'), 10);
+      if (!isEditAnn((gd.layout.annotations || [])[i])) return;
+      var r = g.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return;
+      addHandle('a', i, r.left - cr.left, r.top - cr.top, r.width, r.height, 0);
+    });
+    icons.forEach(function (ic, k) {
+      if (ic.idx == null) return;
+      var m = ic.m, s = ic.st, x = m.lon + s.dx, y = m.lat + s.dy;
+      var cx = ox + xa._offset + xa.l2p(x), cy = oy + ya._offset + ya.l2p(y);
+      var w = Math.abs(xa.l2p(x + m.sizex * s.scale / 2) - xa.l2p(x - m.sizex * s.scale / 2));
+      var h = Math.abs(ya.l2p(y + m.sizey * s.scale / 2) - ya.l2p(y - m.sizey * s.scale / 2));
+      addHandle('i', k, cx - w / 2, cy - h / 2, w, h, s.rot);
+    });
+    styleSel();
+  }
+  function schedule() {
+    if (rafId) return;
+    rafId = requestAnimationFrame(function () { rafId = 0; refresh(); });
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (!editOn || !sel) return;
+    var s = stOf(sel), k = e.key, step = e.shiftKey ? 10 : 1, used = true, mvx = 0, mvy = 0;
+    if (k === 'ArrowLeft') mvx = -step; else if (k === 'ArrowRight') mvx = step;
+    else if (k === 'ArrowUp') mvy = -step; else if (k === 'ArrowDown') mvy = step;
+    else if (k === '+' || k === '=') s.scale = Math.min(4, +(s.scale + 0.05).toFixed(2));
+    else if (k === '-' || k === '_') s.scale = Math.max(0.3, +(s.scale - 0.05).toFixed(2));
+    else if (k === '[') s.rot = Math.max(-180, s.rot - 5);
+    else if (k === ']') s.rot = Math.min(180, s.rot + 5);
+    else if (k === 'Escape') { select(null); return; }
+    else used = false;
+    if (!used) return;
+    e.preventDefault();
+    if (mvx || mvy) {
+      if (sel.t === 'a') { s.dx += mvx; s.dy += mvy; }
+      else {
+        var xa = F().xaxis, ya = F().yaxis;
+        s.dx += mvx / (xa.l2p(1) - xa.l2p(0)); s.dy += mvy / (ya.l2p(1) - ya.l2p(0));
+      }
+    }
+    panel.set(nameOf(sel), s.scale, s.rot); showCoords(); commitSel();
+  });
+
+  window.transitEditToggle = function () {
+    editOn = !editOn;
+    overlay.style.display = editOn ? 'block' : 'none';
+    panel.show(editOn);
+    var b = document.getElementById('transit-edit-btn');
+    if (b) b.textContent = editOn ? '\u2705 Editing' : '\u270F\uFE0F Edit';
+    if (editOn) ensureIcons().then(schedule);
+    else { select(null); overlay.innerHTML = ''; handles = {}; }
+  };
+
+  function whenReady(fn, n) {
+    if (gd.layout && gd._fullLayout && gd.on && window.Plotly) fn();
+    else if ((n || 0) < 200) setTimeout(function () { whenReady(fn, (n || 0) + 1); }, 100);
+  }
+  whenReady(function () {
+    gd.on('plotly_afterplot', schedule);
+    gd.on('plotly_relayout', schedule);
+    applySaved();
+
+    // ---- progressive road-name labels ---------------------------
+    // The road-label text traces (uid road-labels-l0..l3) are ranked by
+    // how long the labelled road is: l0 = longest/most important. At the
+    // initial view only l0 shows; each further zoom step (x1.8 of the
+    // base x-span) reveals the next level. Pan/zoom any other way just
+    // re-evaluates the rule, so labels appear/disappear consistently.
+    function roadLabelZoomFilter(relayout) {
+      var meta = gd.layout && gd.layout.meta;
+      if (!meta || !meta.roadLabelSpan) return;
+      var base = meta.roadLabelSpan;
+      var x0 = (relayout && relayout['xaxis.range[0]'] != null)
+        ? relayout['xaxis.range[0]'] : null;
+      var x1 = (relayout && relayout['xaxis.range[1]'] != null)
+        ? relayout['xaxis.range[1]'] : null;
+      if (x0 == null) {
+        var xr = gd.layout.xaxis && gd.layout.xaxis.range;
+        if (!xr || xr[0] == null) return;
+        x0 = xr[0]; x1 = xr[1];
+      }
+      if (x1 == null) return;
+      var zoom = base / Math.max(x1 - x0, 1e-9);
+      var maxLevel = 0;
+      if (zoom >= 1.8) maxLevel = 1;
+      if (zoom >= 3.2) maxLevel = 2;
+      if (zoom >= 5.5) maxLevel = 3;
+      var upd = {};
+      for (var lv = 0; lv <= 3; lv++) {
+        var i = gd.data.findIndex(function (t) {
+          return t.uid === 'road-labels-l' + lv;
+        });
+        if (i === -1) continue;
+        var want = (lv <= maxLevel);
+        if (gd.data[i].visible === want) continue;  // skip no-op updates
+        upd['data[' + i + '].visible'] = want;
+      }
+      // Only relayout when something actually changed, and guard against
+      // re-entrancy: this handler fires on plotly_relayout, and calling
+      // Plotly.relayout() from inside it would fire the event again and
+      // could loop -- which is what made the map feel frozen.
+      if (!Object.keys(upd).length || roadLabelBusy) return;
+      roadLabelBusy = true;
+      Plotly.relayout(gd, upd).then(function () { roadLabelBusy = false; })
+                           .catch(function () { roadLabelBusy = false; });
+    }
+    var roadLabelBusy = false;
+    gd.on('plotly_relayout', roadLabelZoomFilter);
+    // initial state (in case level-0 changed since build)
+    roadLabelZoomFilter(null);
+  });
+})();
+'''
+
+
+def display_loom_svg(
+    svg, selected_routes, route_name_map, route_color_hex_map,
+    route_agency_map=None,
+):
+
+    # ---- build the export (composite) SVG -----------------------------
+    composite_svg = build_composite_svg(
+        svg,
+        selected_routes,
+        route_name_map,
+        route_color_hex_map,
+        route_agency_map=route_agency_map,
+        title_text="Transit Map of Kathmandu Valley",
+    )
+
+    composite_b64 = base64.b64encode(
+        composite_svg.encode("utf-8")
+    ).decode("ascii")
+
+    # Downloaded SVG only: plain <text> labels instead of <textPath>, so bus-stop
+    # names also show up when the file is opened in Figma / Illustrator.
+    try:
+        export_svg = flatten_textpath_labels(composite_svg)
+    except Exception:
+        export_svg = composite_svg
+    export_b64 = base64.b64encode(export_svg.encode("utf-8")).decode("ascii")
+
+    # On-screen viewer sizing/zoom is based on the BARE map's own declared
+    # size, not the composite's -- title and legend are rendered as fixed
+    # HTML overlays outside the zoom/pan transform (see #loom-img below),
+    # so only the map itself should drive #loom-scroll's aspect ratio.
+    # The composite (title + map + legend baked into one SVG) is still
+    # used for the SVG/PNG downloads further down, untouched by this.
+    _mw_match = re.search(r'width="([\d.]+)"', svg)
+    _mh_match = re.search(r'height="([\d.]+)"', svg)
+    map_w = float(_mw_match.group(1)) if _mw_match else 1600.0
+    map_h = float(_mh_match.group(1)) if _mh_match else 1200.0
 
     legend_groups = {}
     for route_id in selected_routes:
         agency = (route_agency_map or {}).get(route_id, "Unknown Agency")
         legend_groups.setdefault(agency, []).append(route_id)
 
+    # Column-per-route legend: each route is its own fixed-width column
+    # (agency name above the swatch + route name), flowing left-to-right
+    # and wrapping onto new rows. Long route names wrap inside their own
+    # column instead of running into the next one -- the old nowrap rows
+    # made every entry melt together into one unreadable line when two
+    # agencies had routes of similar names.
     legend_items = "".join(
-        f'<div style="font-weight:700; margin:6px 0 2px;">'
-        f'{html.escape(str(agency))}</div>'
-        + "".join(
-            f'<div style="display:flex; align-items:center; gap:7px; margin:3px 0; padding-left:10px;">'
-            f'<span style="width:12px; height:4px; background:{html.escape(str(route_color_hex_map.get(route_id, "#1d4ed8")))}; display:inline-block;"></span>'
-            f'<span>{html.escape(str(route_name_map.get(route_id, route_id)))}</span></div>'
-            for route_id in route_ids
-        )
-        for agency, route_ids in legend_groups.items()
+        f'<div style="display:flex; flex-direction:column; '
+        f'align-items:flex-start; margin:0 14px 8px 0; padding:0; '
+        f'width:180px; flex:0 0 180px; box-sizing:border-box;">'
+        f'<div style="font-size:10px; font-weight:600; line-height:1.2; '
+        f'color:#666; margin-bottom:3px; white-space:nowrap; '
+        f'overflow:hidden; text-overflow:ellipsis; max-width:100%; '
+        f'letter-spacing:0.03em;">'
+        f'{html.escape(str(agency))}'
+        f'</div>'
+        f'<div style="display:flex; align-items:flex-start; gap:7px; '
+        f'padding:0; font-size:12px; font-weight:400; line-height:1.3; '
+        f'color:#222; width:100%; box-sizing:border-box;">'
+        f'<span style="width:16px; height:4px; flex:0 0 16px; '
+        f'margin-top:5px; '
+        f'background:{html.escape(str(route_color_hex_map.get(route_id, "#1d4ed8")))}; '
+        f'display:inline-block; border-radius:2px;"></span>'
+        f'<span style="margin:0; padding:0; font-weight:400; '
+        f'overflow-wrap:break-word; word-break:break-word; min-width:0; flex:1 1 auto;">'
+        f'{html.escape(str(route_name_map.get(route_id, route_id)))}</span></div>'
+        f'</div>'
+        for route_id in selected_routes
     )
+    legend_items = (
+        f'<div style="display:flex; flex-wrap:wrap; align-items:flex-start; '
+        f'max-width:100%;">{legend_items}</div>'
+    )
+
+    symbol_stop_color = html.escape(str(
+        route_color_hex_map.get(
+            next(iter(selected_routes), ""), "#1d4ed8"
+        )
+    ))
+    symbol_items = (
+        '<div style="display:flex; align-items:center; gap:7px; '
+        'margin:2px 0; padding:0; font-size:12px; font-weight:400; '
+        'line-height:1.2; color:#222;">'
+        f'<span style="width:16px; height:4px; flex:0 0 16px; '
+        f'background:{symbol_stop_color}; display:inline-block; border-radius:2px;"></span>'
+        '<span style="margin:0; padding:0; font-weight:400;">Route line</span></div>'
+
+        '<div style="display:flex; align-items:center; gap:7px; '
+        'margin:2px 0; padding:0; font-size:12px; font-weight:400; '
+        'line-height:1.2; color:#222;">'
+        '<span style="width:8px; height:8px; flex:0 0 8px; '
+        'border-radius:50%; background:#fff; '
+        f'border:2px solid {symbol_stop_color}; box-sizing:border-box; '
+        'display:inline-block;"></span>'
+        '<span style="margin:0; padding:0; font-weight:400;">Bus stop / station</span></div>'
+
+        '<div style="display:flex; align-items:center; gap:7px; '
+        'margin:2px 0; padding:0; font-size:12px; font-weight:400; '
+        'line-height:1.2; color:#222;">'
+        '<span style="width:14px; height:14px; flex:0 0 14px; '
+        'border-radius:50%; background:#fff; '
+        f'border:2px solid {symbol_stop_color}; box-sizing:border-box; '
+        'display:inline-block;"></span>'
+        '<span style="margin:0; padding:0; font-weight:400;">Interchange</span></div>'
+
+        '<div style="margin:2px 0; padding:0; font-size:12px; '
+        'font-weight:400; line-height:1.2; color:#222;">Station name</div>'
+    )
+
+    # Stable edit-key: keyed by the selected routes, NOT the SVG bytes.
+    # The SVG changes slightly on every regeneration, so hashing it made
+    # the in-browser Edit mode lose saved icon/label positions whenever
+    # the map was re-rendered. Route selection is stable across re-runs,
+    # so edits persist (until a different route set is chosen).
+    loom_edit_key = hashlib.md5(
+        "|".join(sorted(selected_routes)).encode("utf-8")
+    ).hexdigest()[:12]
+    loom_edit_js = LOOM_EDIT_JS.replace("__EDIT_KEY__", loom_edit_key)
+
     html_code = f"""
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <div id="loom-wrapper" style="position:relative; background:#ffffff;
          border-radius:8px; overflow:hidden; border:1px solid #ddd;">
-            <div style="padding:14px 18px 10px; background:#ffffff; color:#111111;
-                     text-align:center; font-family:Arial,sans-serif;">
-                <div style="font-size:24px; font-weight:700;">Transit Map of Kathmandu Valley</div>
-            </div>
+      <style>
+        /* Make the LOOM SVG itself fill the wrapper width so the map
+           renders as a wide frame, not a small fixed-width image. */
+        #loom-img svg {{ width: 100% !important; height: auto !important; display: block; }}
+        /* Hover tooltip: a floating name card that follows the cursor over
+           landmarks, roads, rivers and stop markers. Native SVG <title>
+           tooltips are delayed/inconsistent, so this custom one is driven
+           by the same data (a <title> child) but styled and positioned
+           like a real tooltip. */
+        #loom-hover-tip {{
+          position: absolute; display: none; z-index: 30; pointer-events: none;
+          background: #fff; color: #111; border: 1px solid #bbb;
+          border-radius: 6px; padding: 5px 10px; font: 600 13px Arial, sans-serif;
+          box-shadow: 0 2px 8px rgba(0,0,0,.18); white-space: nowrap;
+          max-width: 320px; overflow: hidden; text-overflow: ellipsis;
+        }}
+        /* Route lines / rivers / roads highlight subtly while hovered. */
+        #loom-img .loom-hoverable path {{ transition: opacity .12s ease; }}
+        #loom-img .loom-hoverable path:hover {{ opacity: .72; }}
+      </style>
       <div id="loom-toolbar" style="display:flex; gap:6px; align-items:center;
            flex-wrap:wrap; padding:6px 10px; background:#f3f4f6; border-bottom:1px solid #ddd;">
+        <span style="font-size:13px; color:#555; margin-right:auto;">Transit Map of Kathmandu Valley</span>
         <button onclick="loomZoom(1.25)"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
                        border:1px solid #ccc; background:#fff;">➕ Zoom In</button>
@@ -2468,6 +6398,10 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
         <button onclick="loomReset()"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
                        border:1px solid #ccc; background:#fff;">↺ Reset</button>
+        <button id="loom-edit-btn" onclick="window.loomEditToggle && window.loomEditToggle()"
+                title="Move, rotate and resize labels and icons"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #1d4ed8; background:#fff; color:#1d4ed8;">✏️ Edit</button>
         <span style="width:1px; height:22px; background:#ccc; margin:0 4px;"></span>
         <button onclick="loomDownloadSVG()"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
@@ -2477,61 +6411,277 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
                        border:1px solid #ccc; background:#fff;">⬇ PNG</button>
         <button onclick="loomFullscreen()"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
-                       border:1px solid #ccc; background:#fff; margin-left:auto;">
+                       border:1px solid #ccc; background:#fff;">
                 ⛶ Full Screen</button>
       </div>
-     <div id="loom-scroll" style="position:relative; overflow:auto; width:100%; height:680px;
-         background:#fff; padding:24px 28px 70px 28px; box-sizing:border-box;">
-        <img id="loom-img"
-             src="data:image/svg+xml;base64,{encoded}"
-             alt="LOOM Transit Map"
-             style="display:block; width:88%; max-width:88%; height:auto;
-                    margin:0 auto; transform-origin:0 0; transition:transform 0.15s ease;
+     <div id="loom-scroll" style="position:relative; overflow:auto; width:100%; height:760px;
+         background:#fff; padding:24px 28px 24px 28px; box-sizing:border-box;">
+        <div id="loom-img"
+             style="display:block; width:100%; max-width:100%; margin:0 auto;
+                    transform-origin:0 0; transition:transform 0.15s ease;
                     cursor:grab; user-select:none; touch-action:none;">
-                <div style="position:absolute; right:18px; bottom:14px; z-index:2;
-                         background:rgba(255,255,255,0.96); border:1px solid #bbb;
-                         padding:8px 12px; color:#111; font:12px Arial,sans-serif;
-                         box-shadow:0 1px 4px rgba(0,0,0,.18);">
-                    <div style="font-weight:700; margin-bottom:4px;">Routes</div>
-                    {legend_items}
-                </div>
+          {svg}
+        </div>
+        <div id="loom-legend" style="position:absolute; left:18px; bottom:14px; z-index:5;
+             background:rgba(255,255,255,0.97); border:1px solid #d0d0d0;
+             padding:10px 14px; color:#222; font:12px Arial,sans-serif;
+             line-height:1.2; box-shadow:0 1px 4px rgba(0,0,0,.12);
+             display:flex; gap:18px; align-items:flex-start; box-sizing:border-box;
+             max-width:min(94%, 780px);">
+          <div style="min-width:120px;">
+            <div style="font-weight:700; font-size:14px; margin:0 0 6px; padding:0;
+                        color:#111; line-height:1.2;">Routes</div>
+            {legend_items}
+          </div>
+          <div style="min-width:130px; border-left:1px solid #ddd; padding-left:14px;">
+            <div style="font-weight:700; font-size:14px; margin:0 0 6px; padding:0;
+                        color:#111; line-height:1.2;">Symbols</div>
+            {symbol_items}
+          </div>
+        </div>
       </div>
     </div>
     <script>
-      // Base64 of the raw LOOM transit map SVG — exports are just the map,
-      // with no extra title or legend baked in.
-      const loomCompositeSvgDataUrl = "data:image/svg+xml;base64,{composite_b64}";
+      // The legend is a fixed HTML overlay sitting on top of #loom-img (not
+      // inside it), so it never scales/pans with the map. It sits above the
+      // map in stacking order, so a wheel/drag starting on it should not
+      // also zoom or pan the map underneath -- same pattern as the Transit
+      // Map's #transit-legend.
+      (function() {{
+        const legend = document.getElementById('loom-legend');
+        if (legend) {{
+          legend.addEventListener('wheel', function(e) {{ e.stopPropagation(); }}, {{ passive: false }});
+          legend.addEventListener('mousedown', function(e) {{ e.stopPropagation(); }});
+          legend.addEventListener('pointerdown', function(e) {{ e.stopPropagation(); }});
+          legend.addEventListener('touchstart', function(e) {{ e.stopPropagation(); }}, {{ passive: true }});
+        }}
+      }})();
 
-      let loomScale = 1.5; // start zoomed in
-            let loomPanX = 0;
-            let loomPanY = 0;
-            let loomDragging = false;
+      // Downloads still use the composite (title + map + legend baked into
+      // one flat SVG) so the exported file looks complete on its own --
+      // only the interactive on-screen viewer keeps them separate.
+      const loomCompositeSvgDataUrl = "data:image/svg+xml;base64,{composite_b64}";
+      const loomExportSvgDataUrl = "data:image/svg+xml;base64,{export_b64}";
+
+      // The BARE map's own aspect ratio (title/legend excluded -- they're
+      // fixed overlays now), used to size the viewer so the whole map is
+      // visible on load instead of forcing a scroll to see the bottom of it.
+      const LOOM_MAP_W = {map_w};
+      const LOOM_MAP_H = {map_h};
+
+      // Grow (or shrink) #loom-scroll so the map renders at its natural,
+      // unzoomed height within the current width -- capped so it never
+      // takes over the whole browser window. Only applies at scale 1 with
+      // no pan; once the user zooms in, panning/scrolling inside the
+      // fixed-height viewport takes over as normal.
+      function loomFitContainer() {{
+        const scrollEl = document.getElementById('loom-scroll');
+        const img = document.getElementById('loom-img');
+        if (!scrollEl || !img) return;
+        const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+        // The SVG fills #loom-img at width:100%, and #loom-img itself can
+        // be forced wider than the viewport (see loomFullscreen's
+        // min-width), so measure the image's real rendered width rather
+        // than assuming it matches the scroll container.
+        const imgW = img.getBoundingClientRect().width || (scrollEl.clientWidth - 56);
+        const naturalH = imgW * (LOOM_MAP_H / LOOM_MAP_W);
+        const capH = window.innerHeight * (isFs ? 0.92 : 0.85);
+        scrollEl.style.height = Math.max(360, Math.min(naturalH + 94, capH)) + 'px';
+      }}
+
+      // Keep the map inside a predictable desktop/full-screen range.
+      // 1.0 = normal size; users can zoom from 0.85x to 2.5x.
+      const LOOM_MIN_SCALE = 0.85;
+      const LOOM_MAX_SCALE = 2.50;
+      let loomScale = 1.0;
+      let loomPanX = 0;
+      let loomPanY = 0;
+      let loomDragging = false;
             let loomDragStartX = 0;
             let loomDragStartY = 0;
             let loomStartPanX = 0;
             let loomStartPanY = 0;
 
+            function loomClampPan() {{
+                const img = document.getElementById('loom-img');
+                const viewport = document.getElementById('loom-scroll');
+                if (!img || !viewport) return;
+
+                const vw = Math.max(viewport.clientWidth - 40, 1);
+                const vh = Math.max(viewport.clientHeight - 55, 1);
+                const iw = Math.max(img.offsetWidth, 1) * loomScale;
+                const ih = Math.max(img.offsetHeight, 1) * loomScale;
+
+                // Never allow the transformed image to be panned completely
+                // outside the visible desktop/full-screen viewport.
+                const maxX = Math.max(0, (iw - vw) / 2 + 120);
+                const maxY = Math.max(0, (ih - vh) / 2 + 120);
+
+                loomPanX = Math.min(Math.max(loomPanX, -maxX), maxX);
+                loomPanY = Math.min(Math.max(loomPanY, -maxY), maxY);
+            }}
+
             function loomApplyTransform() {{
                 const img = document.getElementById('loom-img');
-                img.style.transform = 'translate(' + loomPanX + 'px, ' + loomPanY + 'px) scale(' + loomScale + ')';
+                if (!img) return;
+                loomClampPan();
+                img.style.transform =
+                    'translate(' + loomPanX + 'px, ' + loomPanY + 'px) scale(' + loomScale + ')';
+                // Expand the scrollable area to the SCALED size of the map
+                // (the CSS transform alone doesn't create scrollable
+                // overflow, which is why zooming used to clip the map).
+                // The margins grow/shrink with the zoom level, so the
+                // scrollbars always span the whole map and every edge of
+                // it stays reachable while zoomed in.
+                const iw = Math.max(img.offsetWidth, 1) * loomScale;
+                const ih = Math.max(img.offsetHeight, 1) * loomScale;
+                img.style.marginRight = Math.max(0, iw - img.offsetWidth) + 'px';
+                img.style.marginBottom = Math.max(0, ih - img.offsetHeight) + 'px';
             }}
 
       function loomZoom(factor) {{
-        loomScale = Math.min(Math.max(loomScale * factor, 0.3), 8);
-                loomApplyTransform();
+        const oldScale = loomScale;
+        loomScale = Math.min(Math.max(loomScale * factor, LOOM_MIN_SCALE), LOOM_MAX_SCALE);
+        if (loomScale === oldScale) return;
+        loomApplyTransform();
       }}
 
       function loomReset() {{
         loomScale = 1;
                 loomPanX = 0;
                 loomPanY = 0;
+                loomFitContainer();
                 loomApplyTransform();
                 document.getElementById('loom-scroll').scrollTo(0, 0);
       }}
 
+      window.addEventListener('resize', loomFitContainer);
+
             const loomImg = document.getElementById('loom-img');
 
-            // apply the initial zoom
+            // Landmark names are hidden until hover/touch/click.
+            const landmarkGroups = Array.from(document.querySelectorAll('#loom-img .loom-landmark'));
+            function hideLandmarkLabels(exceptGroup) {{
+                landmarkGroups.forEach(function(group) {{
+                    if (group === exceptGroup) return;
+                    const label = group.querySelector('.landmark-label');
+                    if (label) label.setAttribute('visibility', 'hidden');
+                    group.classList.remove('landmark-active');
+                }});
+            }}
+            function showLandmarkLabel(group) {{
+                const label = group.querySelector('.landmark-label');
+                if (!label) return;
+                hideLandmarkLabels(group);
+                label.setAttribute('visibility', 'visible');
+                group.classList.add('landmark-active');
+            }}
+            landmarkGroups.forEach(function(group) {{
+                group.addEventListener('mouseenter', function() {{ showLandmarkLabel(group); }});
+                group.addEventListener('mouseleave', function() {{
+                    if (!group.classList.contains('landmark-pinned')) {{
+                        const label = group.querySelector('.landmark-label');
+                        if (label) label.setAttribute('visibility', 'hidden');
+                        group.classList.remove('landmark-active');
+                    }}
+                }});
+                group.addEventListener('click', function(event) {{
+                    event.stopPropagation();
+                    const pinned = group.classList.contains('landmark-pinned');
+                    landmarkGroups.forEach(function(g) {{ g.classList.remove('landmark-pinned'); }});
+                    if (!pinned) {{ showLandmarkLabel(group); group.classList.add('landmark-pinned'); }}
+                    else {{ const label=group.querySelector('.landmark-label'); if(label) label.setAttribute('visibility','hidden'); group.classList.remove('landmark-active'); }}
+                }});
+                group.addEventListener('touchstart', function(event) {{ event.stopPropagation(); showLandmarkLabel(group); group.classList.add('landmark-pinned'); }}, {{passive:true}});
+                group.addEventListener('focus', function() {{ showLandmarkLabel(group); }});
+            }});
+
+            // ---- HOVER TOOLTIP -----------------------------------------
+            // A floating name card that follows the cursor over landmarks,
+            // roads, rivers and route lines. Names come from each element's
+            // existing <title> child (already generated for roads) or from
+            // data attributes for landmarks; stops use the nearest station
+            // label text. The custom card is styled and immediate, unlike
+            // the slow native SVG <title> tooltip.
+            const hoverTip = document.createElement('div');
+            hoverTip.id = 'loom-hover-tip';
+            document.getElementById('loom-wrapper').appendChild(hoverTip);
+            let hoverTarget = null;
+
+            function loomHoverName(el) {{
+                // Landmark groups: use their data name.
+                const lm = el.closest && el.closest('g.loom-landmark');
+                if (lm) {{
+                    const name = lm.getAttribute('data-landmark-name');
+                    return name ? '\\uD83D\\uDCFD ' + name : null;
+                }}
+                // Roads / rivers: <title> child carries the name.
+                if (el.tagName && el.tagName.toLowerCase() === 'path') {{
+                    const inRoad = el.closest && el.closest('g.loom-road');
+                    const inRiver = el.closest && el.closest('g.loom-river');
+                    const t = el.querySelector('title');
+                    const name = t ? t.textContent.trim() : null;
+                    if (inRoad && name) return '\\uD83D\\uDEE3 ' + name;
+                    if (inRiver && name) return '\\uD83D\\uDE6E ' + name;
+                    if (name) return name;
+                }}
+                // Stop markers (LOOM station symbols): nearest label text.
+                if (el.tagName && el.tagName.toLowerCase() === 'circle') {{
+                    const cx = parseFloat(el.getAttribute('cx'));
+                    const cy = parseFloat(el.getAttribute('cy'));
+                    if (!isNaN(cx) && !isNaN(cy)) {{
+                        let best = null, bestD = 1e9;
+                        document.querySelectorAll('#loom-img text.station-label').forEach(function (lb) {{
+                            const b = lb.getBBox();
+                            const bx = b.x + b.width / 2, by = b.y + b.height / 2;
+                            const d = Math.hypot(bx - cx, by - cy);
+                            if (d < bestD) {{ bestD = d; best = lb; }}
+                        }});
+                        if (best && bestD < 40) {{
+                            const name = (best.textContent || '').replace(/\\s+/g, ' ').trim();
+                            if (name) return '\\uD83D\\uDE8F ' + name;
+                        }}
+                    }}
+                }}
+                return null;
+            }}
+
+            function loomShowTip(text, ev) {{
+                hoverTip.textContent = text;
+                hoverTip.style.display = 'block';
+                loomPositionTip(ev);
+            }}
+            function loomPositionTip(ev) {{
+                const wrap = document.getElementById('loom-wrapper').getBoundingClientRect();
+                const x = ev.clientX - wrap.left + 14;
+                const y = ev.clientY - wrap.top + 14;
+                hoverTip.style.left = Math.min(Math.max(6, x), wrap.width - hoverTip.offsetWidth - 6) + 'px';
+                hoverTip.style.top = Math.min(Math.max(6, y), wrap.height - hoverTip.offsetHeight - 6) + 'px';
+            }}
+            function loomHideTip() {{
+                hoverTip.style.display = 'none';
+            }}
+
+            loomImg.addEventListener('pointermove', function (event) {{
+                // Ignore while panning or while Edit mode is active.
+                if (loomDragging || (loomImg.classList.contains('ed-on'))) {{ loomHideTip(); return; }}
+                const target = event.target;
+                const name = target === hoverTarget ? hoverTip.dataset.name : loomHoverName(target);
+                if (name) {{
+                    if (target !== hoverTarget) {{ hoverTarget = target; hoverTip.dataset.name = name; }}
+                    loomShowTip(name, event);
+                }} else {{
+                    hoverTarget = null;
+                    loomHideTip();
+                }}
+            }}, true);
+            loomImg.addEventListener('pointerdown', loomHideTip);
+            loomImg.addEventListener('pointerleave', loomHideTip);
+
+            // Size the viewer to the map's own aspect ratio, then apply
+            // the initial (unzoomed) transform, so the whole map is
+            // visible without needing to scroll first.
+            loomFitContainer();
             loomApplyTransform();
 
             // mouse-wheel zoom (zoom towards the cursor)
@@ -2542,10 +6692,11 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
                 const rect = loomImg.getBoundingClientRect();
                 const cx = event.clientX - rect.left;
                 const cy = event.clientY - rect.top;
-                const newScale = Math.min(Math.max(loomScale * factor, 0.3), 8);
+                const newScale = Math.min(Math.max(loomScale * factor, LOOM_MIN_SCALE), LOOM_MAX_SCALE);
                 loomPanX = cx - (cx - loomPanX) * (newScale / loomScale);
                 loomPanY = cy - (cy - loomPanY) * (newScale / loomScale);
                 loomScale = newScale;
+                loomClampPan();
                 loomApplyTransform();
             }}, {{ passive: false }});
 
@@ -2594,8 +6745,11 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
       // Export the bare transit map (same SVG displayed on screen).
       async function loomDownloadSVG() {{
         try {{
-          const res = await fetch(loomCompositeSvgDataUrl);
-          const blob = await res.blob();
+          const res = await fetch(loomExportSvgDataUrl);
+          let blob = await res.blob();
+          if (window.loomEditHasChanges && window.loomEditHasChanges()) {{
+            blob = new Blob([window.loomEditApplyToSvgText(await blob.text())], {{ type: 'image/svg+xml' }});
+          }}
           const url = URL.createObjectURL(blob);
           loomTriggerDownload(url, 'loom_transit_map.svg');
           setTimeout(() => URL.revokeObjectURL(url), 2000);
@@ -2604,24 +6758,37 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
         }}
       }}
 
-      // PNG export rasterizes the same bare map SVG used for the SVG
-      // download, so both exports match exactly what's on screen.
+      // PNG export rasterizes the composite SVG (map + title + legend +
+      // symbols), so the exported file matches the full panel.
       async function loomDownloadPNG() {{
         try {{
-          const scale = 3; // render at higher resolution than on-screen size
+          // Render at FULL-SCREEN-SIZE resolution: at least 3x the map's
+          // natural size, and wide enough to match a 1920px-wide screen,
+          // so the downloaded PNG is a crisp, whole-map poster image.
+          const scale = 4;
+
+          // Parse the explicit width/height out of the composite SVG so we
+          // never depend on naturalWidth (which some browsers report as 0
+          // for large SVG data URLs).
+          const svgText = atob(loomCompositeSvgDataUrl.split(',')[1]);
+          const wMatch = svgText.match(/width="([\\d.]+)/);
+          const hMatch = svgText.match(/height="([\\d.]+)/);
+          const fallbackW = wMatch ? parseFloat(wMatch[1]) : 1600;
+          const fallbackH = hMatch ? parseFloat(hMatch[1]) : 1200;
+
           const tempImg = new Image();
           tempImg.crossOrigin = 'anonymous';
 
           tempImg.onload = function() {{
-            const w = tempImg.naturalWidth * scale;
-            const h = tempImg.naturalHeight * scale;
+            let w = tempImg.naturalWidth || fallbackW;
+            let h = tempImg.naturalHeight || fallbackH;
             const canvas = document.createElement('canvas');
-            canvas.width = w;
-            canvas.height = h;
+            canvas.width = Math.round(w * scale);
+            canvas.height = Math.round(h * scale);
             const ctx = canvas.getContext('2d');
             ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, w, h);
-            ctx.drawImage(tempImg, 0, 0, w, h);
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
 
             canvas.toBlob(function(blob) {{
               if (!blob) {{ alert('PNG export failed.'); return; }}
@@ -2635,7 +6802,12 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
             alert('PNG download failed: could not rasterize the composite SVG.');
           }};
 
-          tempImg.src = loomCompositeSvgDataUrl;
+          let pngSrc = loomCompositeSvgDataUrl;
+          if (window.loomEditHasChanges && window.loomEditHasChanges()) {{
+            const baseTxt = await (await fetch(loomCompositeSvgDataUrl)).text();
+            pngSrc = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(window.loomEditApplyToSvgText(baseTxt));
+          }}
+          tempImg.src = pngSrc;
         }} catch (e) {{
           alert('PNG download failed: ' + e);
         }}
@@ -2653,27 +6825,31 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
             el.style.width = '100vw'; el.style.height = '100vh';
             el.style.zIndex = '99999';
             el.style.background = '#ffffff';
-            scrollEl.style.height = 'calc(100vh - 44px)';
             scrollEl.style.width = '100vw';
-            scrollEl.style.padding = '18px 24px 80px 24px';
+            scrollEl.style.padding = '18px 24px 24px 24px';
             loomImg.style.width = '96vw';
-            loomImg.style.minWidth = '1600px';
+            loomImg.style.minWidth = '0';
             loomImg.style.maxWidth = 'none';
             loomImg.style.margin = '0 auto';
           }} else {{
             el.style.position = 'relative';
             el.style.width = 'auto'; el.style.height = 'auto';
             el.style.zIndex = 'auto';
-            scrollEl.style.height = '760px';
             scrollEl.style.width = '100%';
-            scrollEl.style.padding = '24px 28px 70px 28px';
+            scrollEl.style.padding = '24px 28px 24px 28px';
             loomImg.style.width = '96%';
-            loomImg.style.minWidth = '1400px';
+            loomImg.style.minWidth = '0';
             loomImg.style.maxWidth = 'none';
           }}
+          // Re-measure and refit after the layout above takes effect.
+          requestAnimationFrame(loomFitContainer);
         }}
 
         if (!isFs) {{
+          loomPanX = 0;
+          loomPanY = 0;
+          loomScale = 1.0;
+          loomApplyTransform();
           const req = el.requestFullscreen || el.webkitRequestFullscreen;
           if (req) {{
             req.call(el).then(() => applyFullscreenStyle(true))
@@ -2693,15 +6869,622 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
           const el = document.getElementById('loom-wrapper');
           el.style.position = 'relative';
           el.style.width = 'auto'; el.style.height = 'auto';
-          document.getElementById('loom-scroll').style.height = '680px';
         }}
+        requestAnimationFrame(loomFitContainer);
       }});
     </script>
+    <script>{EDIT_PANEL_JS}</script>
+    <script>{loom_edit_js}</script>
+
     """
-    st.components.v1.html(html_code, height=830, scrolling=True)
+    st.components.v1.html(html_code, height=900, scrolling=True)
 
 
-# ================= APP =================
+def build_map_legend_html(selected_routes, route_name_map, route_color_hex_map,
+                           route_agency_map=None):
+    """Build the Routes/Symbols legend markup shared by the Transit Map and
+    the LOOM map, so both views show exactly the same legend.
+
+    Each route gets its own small column (agency name above a colored
+    swatch + route name); columns flow left-to-right and wrap onto new
+    rows as needed, instead of stacking every route in one long list.
+    """
+
+    legend_items = "".join(
+        f'<div style="display:flex; flex-direction:column; '
+        f'align-items:flex-start; margin:0 20px 10px 0; padding:0; '
+        f'width:190px; flex:0 0 190px; box-sizing:border-box;">'
+        f'<div style="font-size:11px; font-weight:400; line-height:1.2; '
+        f'color:#666; margin-bottom:3px; white-space:nowrap; '
+        f'overflow:hidden; text-overflow:ellipsis; max-width:100%;">'
+        f'{html.escape(str((route_agency_map or {}).get(route_id, "Unknown Agency")))}'
+        f'</div>'
+        f'<div style="display:flex; align-items:flex-start; gap:7px; '
+        f'padding:0; font-size:13px; font-weight:400; line-height:1.3; '
+        f'color:#222; width:100%; box-sizing:border-box;">'
+        f'<span style="width:16px; height:4px; flex:0 0 16px; '
+        f'margin-top:5px; '
+        f'background:{html.escape(str(route_color_hex_map.get(route_id, "#1d4ed8")))}; '
+        f'display:inline-block; border-radius:2px;"></span>'
+        f'<span style="margin:0; padding:0; font-weight:400; '
+        f'overflow-wrap:break-word; word-break:break-word; min-width:0; flex:1 1 auto;">'
+        f'{html.escape(str(route_name_map.get(route_id, route_id)))}</span></div>'
+        f'</div>'
+        for route_id in selected_routes
+    )
+    legend_items = (
+        f'<div style="display:flex; flex-wrap:wrap; align-items:flex-start; '
+        f'max-width:660px;">{legend_items}</div>'
+    )
+
+    symbol_stop_color = html.escape(str(
+        route_color_hex_map.get(next(iter(selected_routes), ""), "#1d4ed8")
+    ))
+    symbol_items = (
+        '<div style="display:flex; align-items:center; gap:7px; '
+        'margin:2px 0; padding:0; font-size:13px; font-weight:400; '
+        'line-height:1.2; color:#222;">'
+        f'<span style="width:16px; height:4px; flex:0 0 16px; '
+        f'background:{symbol_stop_color}; display:inline-block; border-radius:2px;"></span>'
+        '<span style="margin:0; padding:0; font-weight:400;">Route line</span></div>'
+
+        '<div style="display:flex; align-items:center; gap:7px; '
+        'margin:2px 0; padding:0; font-size:13px; font-weight:400; '
+        'line-height:1.2; color:#222;">'
+        '<span style="width:8px; height:8px; flex:0 0 8px; '
+        'border-radius:50%; background:#fff; '
+        f'border:2px solid {symbol_stop_color}; box-sizing:border-box; '
+        'display:inline-block;"></span>'
+        '<span style="margin:0; padding:0; font-weight:400;">Bus stop / station</span></div>'
+
+        '<div style="display:flex; align-items:center; gap:7px; '
+        'margin:2px 0; padding:0; font-size:13px; font-weight:400; '
+        'line-height:1.2; color:#222;">'
+        '<span style="width:14px; height:14px; flex:0 0 14px; '
+        'border-radius:50%; background:#fff; '
+        f'border:2px solid {symbol_stop_color}; box-sizing:border-box; '
+        'display:inline-block;"></span>'
+        '<span style="margin:0; padding:0; font-weight:400;">Interchange</span></div>'
+
+        '<div style="margin:2px 0; padding:0; font-size:13px; '
+        'font-weight:400; line-height:1.2; color:#222;">Station name</div>'
+    )
+
+    return legend_items, symbol_items
+
+
+def _build_map_legend_rows(selected_routes, route_name_map, route_color_hex_map,
+                           route_agency_map=None):
+    """Return the Routes/Symbols legend as plain JSON-able data, used by the
+    Transit Map's PNG export to draw the legend directly onto the export
+    canvas (html2canvas chokes on malformed selectors Plotly injects into
+    the page CSS, so we avoid rasterizing the live legend DOM entirely)."""
+
+    legend_groups = {}
+    for route_id in selected_routes:
+        agency = (route_agency_map or {}).get(route_id, "Unknown Agency")
+        legend_groups.setdefault(agency, []).append(route_id)
+
+    groups = [
+        {
+            "agency": str(agency),
+            "routes": [
+                {
+                    "name": str(route_name_map.get(route_id, route_id)),
+                    "color": str(route_color_hex_map.get(route_id, "#1d4ed8")),
+                }
+                for route_id in route_ids
+            ],
+        }
+        for agency, route_ids in legend_groups.items()
+    ]
+
+    symbol_stop_color = str(
+        route_color_hex_map.get(next(iter(selected_routes), ""), "#1d4ed8")
+    )
+    symbols = [
+        {"type": "line", "color": symbol_stop_color, "label": "Route line"},
+        {"type": "circle", "radius": 4, "color": symbol_stop_color,
+         "label": "Bus stop / station"},
+        {"type": "circle", "radius": 7, "color": symbol_stop_color,
+         "label": "Interchange"},
+        {"type": "text", "color": symbol_stop_color, "label": "Station name"},
+    ]
+
+    return {"groups": groups, "symbols": symbols}
+
+
+def display_transit_map(fig, selected_routes, route_name_map, route_color_hex_map,
+                         route_agency_map=None, height=720):
+    """Render the Plotly Transit Map with a fixed Routes/Symbols legend box,
+    styled and positioned the same way as the LOOM map's legend.
+
+    The legend is a plain HTML overlay sitting on top of the Plotly div
+    (not part of the Plotly figure), so it never moves, grows into, or
+    hides behind anything when the map is zoomed or panned -- it just
+    stays put in its own corner. Because it sits above the plot in the
+    stacking order, scrolling or dragging while the pointer is over the
+    legend never reaches the map underneath; everywhere else on the map,
+    zoom and pan keep working as before. In full screen, the legend
+    stretches to span the screen from edge to edge instead of staying a
+    small corner box.
+    """
+
+    # The overlay legend replaces Plotly's own legend, so switch that off
+    # -- otherwise the routes and symbols would show up twice.
+    fig.update_layout(showlegend=False)
+
+    plot_html = pio.to_html(
+        fig,
+        include_plotlyjs="cdn",
+        full_html=False,
+        div_id="transit-plot-div",
+        config={
+            "scrollZoom": True,
+            "responsive": True,
+            "displayModeBar": True,
+            "displaylogo": False,
+            # Plotly's own built-in camera/download button only captures the
+            # chart's internal SVG canvas, not the HTML legend sitting on
+            # top of it, so it would silently export a map with no legend.
+            # Remove it in favor of the "PNG" button above, which captures
+            # both together.
+            "modeBarButtonsToRemove": ["toImage"],
+        },
+    )
+
+    legend_items, symbol_items = build_map_legend_html(
+        selected_routes, route_name_map, route_color_hex_map, route_agency_map
+    )
+
+    # Structured legend data (as JSON) for the JavaScript PNG exporter,
+    # so it can draw the legend directly on the export canvas without
+    # relying on html2canvas (which chokes on Plotly's injected CSS).
+    legend_rows_json = json.dumps(
+        _build_map_legend_rows(
+            selected_routes, route_name_map, route_color_hex_map, route_agency_map
+        ),
+        ensure_ascii=False,
+    )
+
+    transit_edit_key = hashlib.md5(plot_html.encode("utf-8")).hexdigest()[:12]
+    transit_edit_js = TRANSIT_EDIT_JS.replace("__EDIT_KEY__", transit_edit_key)
+
+    html_code = f"""
+    <div id="transit-wrapper" style="position:relative; background:#ffffff;
+         border-radius:8px; overflow:hidden; border:1px solid #ddd;">
+      <style>
+        /* Plotly has no linecap option: round the caps/joins here so
+           separate road segments join without gaps or notches. */
+        #transit-plot-div .scatterlayer .trace path.js-line {{
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }}
+      </style>
+      <div id="transit-toolbar" style="display:flex; gap:6px; align-items:center;
+           flex-wrap:wrap; padding:6px 10px; background:#f3f4f6; border-bottom:1px solid #ddd;">
+        <span style="font-size:13px; color:#555; margin-right:auto;">Transit Map of Kathmandu Valley</span>
+        <button id="transit-edit-btn" onclick="window.transitEditToggle && window.transitEditToggle()"
+                title="Move, rotate and resize labels and icons"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #1d4ed8; background:#fff; color:#1d4ed8;">✏️ Edit</button>
+        <button onclick="transitDownloadPNG()"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #ccc; background:#fff;">⬇ PNG</button>
+        <button onclick="transitFullscreen()"
+                style="padding:4px 10px; cursor:pointer; border-radius:6px;
+                       border:1px solid #ccc; background:#fff;">⛶ Full Screen</button>
+      </div>
+      <div id="transit-plot-container" style="position:relative; width:100%; height:{height}px;">
+        {plot_html}
+        <div id="transit-legend" style="position:absolute; left:18px; bottom:14px; z-index:5;
+             background:rgba(255,255,255,0.97); border:1px solid #d0d0d0;
+             padding:10px 14px; color:#222; font:13px Arial,sans-serif;
+             line-height:1.2; box-shadow:0 1px 4px rgba(0,0,0,.12);
+             display:flex; gap:18px; align-items:flex-start; box-sizing:border-box;
+             max-width:min(94%, 780px);">
+          <div style="min-width:120px;">
+            <div style="font-weight:700; font-size:15px; margin:0 0 6px; padding:0;
+                        color:#111; line-height:1.2;">Routes</div>
+            {legend_items}
+          </div>
+          <div style="min-width:130px; border-left:1px solid #ddd; padding-left:14px;">
+            <div style="font-weight:700; font-size:15px; margin:0 0 6px; padding:0;
+                        color:#111; line-height:1.2;">Symbols</div>
+            {symbol_items}
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      // The legend sits on top of the plot in the stacking order already,
+      // so a wheel/drag that starts on it never reaches the map behind it.
+      // Stopping propagation here just makes that explicit and stops the
+      // page itself from scrolling while the pointer is over the legend.
+      (function() {{
+        const legend = document.getElementById('transit-legend');
+        legend.addEventListener('wheel', function(e) {{ e.stopPropagation(); }}, {{ passive: false }});
+        legend.addEventListener('mousedown', function(e) {{ e.stopPropagation(); }});
+        legend.addEventListener('touchstart', function(e) {{ e.stopPropagation(); }}, {{ passive: true }});
+      }})();
+
+      function transitResizePlot() {{
+        const gd = document.getElementById('transit-plot-div');
+        if (gd && window.Plotly) {{
+          window.Plotly.Plots.resize(gd);
+        }}
+      }}
+
+      // Landmark names are interactive on touch/click as well as Plotly hover.
+      // The invisible landmark hit-area traces carry customdata with the name.
+      (function() {{
+        const gd = document.getElementById('transit-plot-div');
+        if (!gd) return;
+
+        const tip = document.createElement('div');
+        tip.id = 'transit-landmark-touch-label';
+        tip.style.cssText = 'position:absolute;display:none;z-index:20;background:#fff;color:#111;border:1px solid #bbb;border-radius:6px;padding:6px 9px;font:600 13px Arial,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.18);pointer-events:none;white-space:nowrap;';
+        document.getElementById('transit-plot-container').appendChild(tip);
+
+        gd.on('plotly_click', function(eventData) {{
+          const point = eventData && eventData.points && eventData.points[0];
+          if (!point || !point.customdata || !point.customdata[0]) return;
+
+          const name = point.customdata[0];
+          tip.textContent = name;
+          tip.style.display = 'block';
+
+          const rect = gd.getBoundingClientRect();
+          const px = Number(point.event && point.event.clientX) - rect.left;
+          const py = Number(point.event && point.event.clientY) - rect.top;
+          tip.style.left = Math.max(8, px + 10) + 'px';
+          tip.style.top = Math.max(8, py - 34) + 'px';
+        }});
+
+        gd.addEventListener('mouseleave', function() {{
+          tip.style.display = 'none';
+        }});
+      }})();
+
+      // Composites the Plotly map and the HTML legend into one PNG, so
+      // the legend actually shows up in the downloaded image -- Plotly's
+      // own export only rasterizes its own SVG canvas and never touches
+      // the legend overlay sitting on top of it.
+      function transitTriggerDownload(url, filename) {{
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }}
+
+      async function transitDownloadPNG() {{
+        try {{
+          const gd = document.getElementById('transit-plot-div');
+          const legend = document.getElementById('transit-legend');
+          const container = document.getElementById('transit-plot-container');
+          if (!gd || !window.Plotly) {{
+            alert('The map is still loading -- try again in a moment.');
+            return;
+          }}
+
+          const scale = 2;
+          const w = container.offsetWidth;
+          const h = container.offsetHeight;
+          // The Plotly figure already renders its own title, so the export
+          // canvas is exactly the map + legend -- no extra title band.
+
+          const legendData = {legend_rows_json};
+
+          const mapDataUrl = await window.Plotly.toImage(
+            gd, {{ format: 'png', width: w, height: h, scale: scale }}
+          );
+
+          const mapImg = new Image();
+          mapImg.onload = function() {{
+            const canvas = document.createElement('canvas');
+            canvas.width = w * scale;
+            canvas.height = h * scale;
+            const ctx = canvas.getContext('2d');
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.drawImage(mapImg, 0, 0, w * scale, h * scale);
+
+            // Draw the legend box manually (html2canvas is unreliable here
+            // because Plotly injects malformed CSS selectors into the page).
+            // Column widths are measured from the actual text so long route
+            // names never spill into the Symbols column.
+            const fs = 13 * scale;
+            const headFs = 15 * scale;
+            const rowH = 20 * scale;
+            const gap = 8 * scale;
+            const colGap = 20 * scale;
+            const padX = 14 * scale;
+            const padTop = 12 * scale;
+            const glyphW = 26 * scale;
+
+            function textWAt(t, fontPx, weight) {{
+              ctx.font = (weight ? weight + ' ' : '') + fontPx + 'px Arial, sans-serif';
+              return ctx.measureText(t).width;
+            }}
+
+            // Greedy word-wrap: breaks `text` into lines that each fit
+            // within maxW at the currently-set ctx.font, so a long route
+            // name wraps inside its own column instead of overflowing
+            // into the neighboring one.
+            function wrapText(text, maxW) {{
+              const words = String(text).split(' ');
+              const lines = [];
+              let line = '';
+              words.forEach(function(word) {{
+                const test = line ? line + ' ' + word : word;
+                if (ctx.measureText(test).width > maxW && line) {{
+                  lines.push(line);
+                  line = word;
+                }} else {{
+                  line = test;
+                }}
+              }});
+              if (line) lines.push(line);
+              return lines.length ? lines : [''];
+            }}
+
+            function truncateText(text, maxW) {{
+              let t = String(text);
+              if (ctx.measureText(t).width <= maxW) return t;
+              while (t.length > 1 && ctx.measureText(t + '…').width > maxW) {{
+                t = t.slice(0, -1);
+              }}
+              return t + '…';
+            }}
+
+            // Flatten the agency groups into one route-per-column entry
+            // list, each column showing its agency name above a swatch +
+            // route name -- mirrors the on-screen legend's layout. Every
+            // column uses the SAME fixed width, and text wraps/truncates
+            // to fit inside it, so columns can never bleed into each other.
+            const agencyFs = 11 * scale;
+            const routeFs = fs;
+            const colW = 190 * scale;
+            const colGapX = 20 * scale;
+            const colGapY = 10 * scale;
+            const glyphW2 = 22 * scale;
+            const routesMaxRowW = 660 * scale;
+            const lineGap = 2 * scale;
+
+            const agencyLineH = agencyFs * 1.3;
+            const routeLineH = routeFs * 1.3;
+
+            const routeEntries = [];
+            legendData.groups.forEach(function(group) {{
+              group.routes.forEach(function(route) {{
+                ctx.font = agencyFs + 'px Arial, sans-serif';
+                const agencyText = truncateText(group.agency, colW);
+                ctx.font = routeFs + 'px Arial, sans-serif';
+                const nameLines = wrapText(route.name, colW - glyphW2);
+                routeEntries.push({{
+                  agencyText: agencyText,
+                  nameLines: nameLines,
+                  color: route.color,
+                  colW: colW,
+                  entryH: agencyLineH + 3 * scale
+                    + nameLines.length * routeLineH
+                    + (nameLines.length - 1) * lineGap,
+                }});
+              }});
+            }});
+
+            // Flow the fixed-width columns left-to-right, wrapping onto
+            // new rows; each row's height is set by its tallest entry.
+            const legendRows = [];
+            let curRow = [];
+            let curW = 0;
+            routeEntries.forEach(function(e) {{
+              const addW = colW + (curRow.length ? colGapX : 0);
+              if (curRow.length && curW + addW > routesMaxRowW) {{
+                legendRows.push(curRow);
+                curRow = [];
+                curW = 0;
+              }}
+              curW += colW + (curRow.length ? colGapX : 0);
+              curRow.push(e);
+            }});
+            if (curRow.length) legendRows.push(curRow);
+
+            const rowHeights = legendRows.map(function(r) {{
+              return Math.max.apply(null, r.map(function(e) {{ return e.entryH; }}));
+            }});
+
+            let colW1 = textWAt('Routes', headFs, '700');
+            legendRows.forEach(function(r) {{
+              const rowW = r.length * colW + (r.length - 1) * colGapX;
+              colW1 = Math.max(colW1, rowW);
+            }});
+            const routesBlockH = rowHeights.length
+              ? rowHeights.reduce(function(a, b) {{ return a + b; }}, 0)
+                + (rowHeights.length - 1) * colGapY
+              : 0;
+
+            // Measure Symbols column.
+            let colW2 = textWAt('Symbols', headFs, '700');
+            legendData.symbols.forEach(function(symbol) {{
+              colW2 = Math.max(colW2, glyphW + textWAt(symbol.label, fs));
+            }});
+            colW2 += glyphW;
+
+            const symbolsBlockH = legendData.symbols.length * rowH;
+            const boxW = padX * 2 + colW1 + colGap + colW2;
+            const boxH = padTop * 2 + headFs + gap + Math.max(routesBlockH, symbolsBlockH);
+            const boxX = 18 * scale;
+            const boxY = canvas.height - boxH - 14 * scale;
+
+            ctx.fillStyle = 'rgba(255,255,255,0.97)';
+            ctx.fillRect(boxX, boxY, boxW, boxH);
+            ctx.strokeStyle = '#d0d0d0';
+            ctx.lineWidth = 1 * scale;
+            ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+            ctx.textAlign = 'left';
+            ctx.fillStyle = '#111111';
+            const x1 = boxX + padX;
+            const x2 = x1 + colW1 + colGap;
+            const headY = boxY + padTop + headFs;
+
+            ctx.font = '700 ' + headFs + 'px Arial, sans-serif';
+            ctx.fillText('Routes', x1, headY);
+            ctx.fillText('Symbols', x2, headY);
+
+            let yRow = headY + gap + agencyLineH * 0.8;
+            legendRows.forEach(function(r, rowIdx) {{
+              let xCol = x1;
+              r.forEach(function(e) {{
+                ctx.font = agencyFs + 'px Arial, sans-serif';
+                ctx.fillStyle = '#666666';
+                ctx.fillText(e.agencyText, xCol, yRow);
+
+                const swatchY = yRow + 3 * scale + routeLineH * 0.7;
+                ctx.fillStyle = e.color;
+                ctx.fillRect(xCol, swatchY - 4 * scale, 16 * scale, 4 * scale);
+                ctx.font = routeFs + 'px Arial, sans-serif';
+                ctx.fillStyle = '#222222';
+                e.nameLines.forEach(function(line, lineIdx) {{
+                  ctx.fillText(line, xCol + glyphW2, swatchY + lineIdx * (routeLineH + lineGap));
+                }});
+
+                xCol += e.colW + colGapX;
+              }});
+              yRow += rowHeights[rowIdx] + colGapY;
+            }});
+
+            ctx.font = fs + 'px Arial, sans-serif';
+            let yS = headY + gap + rowH * 0.75;
+            legendData.symbols.forEach(function(symbol) {{
+              const cx = x2 + 8 * scale;
+              if (symbol.type === 'line') {{
+                ctx.fillStyle = symbol.color;
+                ctx.fillRect(x2, yS - 5 * scale, 16 * scale, 4 * scale);
+              }} else if (symbol.type === 'circle') {{
+                ctx.beginPath();
+                ctx.arc(cx, yS - 3.5 * scale, symbol.radius * scale, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffffff';
+                ctx.fill();
+                ctx.strokeStyle = symbol.color;
+                ctx.lineWidth = 2 * scale;
+                ctx.stroke();
+              }}
+              ctx.fillStyle = '#222222';
+              ctx.fillText(symbol.label, x2 + glyphW, yS);
+              yS += rowH;
+            }});
+
+            canvas.toBlob(function(blob) {{
+              if (!blob) {{ alert('PNG export failed.'); return; }}
+              const url = URL.createObjectURL(blob);
+              transitTriggerDownload(url, 'transit_map.png');
+              setTimeout(() => URL.revokeObjectURL(url), 2000);
+            }}, 'image/png');
+          }};
+          mapImg.onerror = function() {{
+            alert('PNG download failed: could not rasterize the map.');
+          }};
+          mapImg.src = mapDataUrl;
+        }} catch (e) {{
+          alert('PNG download failed: ' + e);
+        }}
+      }}
+
+      function transitSetLegendFullWidth(on) {{
+        const legend = document.getElementById('transit-legend');
+        if (on) {{
+          legend.style.left = '0';
+          legend.style.right = '0';
+          legend.style.bottom = '0';
+          legend.style.width = '100%';
+          legend.style.borderRadius = '0';
+          legend.style.justifyContent = 'center';
+          legend.style.padding = '10px 32px';
+        }} else {{
+          legend.style.right = 'auto';
+          legend.style.left = '18px';
+          legend.style.bottom = '14px';
+          legend.style.width = 'auto';
+          legend.style.borderRadius = '0';
+          legend.style.justifyContent = 'flex-start';
+          legend.style.padding = '9px 12px';
+        }}
+      }}
+
+      function transitFullscreen() {{
+        const el = document.getElementById('transit-wrapper');
+        const container = document.getElementById('transit-plot-container');
+        const isFs = document.fullscreenElement || document.webkitFullscreenElement;
+
+        function applyFullscreenStyle(on) {{
+          if (on) {{
+            el.style.position = 'fixed';
+            el.style.top = '0'; el.style.left = '0';
+            el.style.width = '100vw'; el.style.height = '100vh';
+            el.style.zIndex = '99999';
+            el.style.background = '#ffffff';
+            container.style.height = 'calc(100vh - 40px)';
+            container.style.width = '100vw';
+          }} else {{
+            el.style.position = 'relative';
+            el.style.width = 'auto'; el.style.height = 'auto';
+            el.style.zIndex = 'auto';
+            container.style.height = '{height}px';
+            container.style.width = '100%';
+          }}
+          // Legend spans the full width of the screen edge-to-edge only
+          // while in full screen; back to its normal corner box otherwise.
+          transitSetLegendFullWidth(on);
+          setTimeout(transitResizePlot, 200);
+        }}
+
+        if (!isFs) {{
+          const req = el.requestFullscreen || el.webkitRequestFullscreen;
+          if (req) {{
+            req.call(el).then(() => applyFullscreenStyle(true))
+                         .catch(() => applyFullscreenStyle(true));
+          }} else {{
+            applyFullscreenStyle(true);
+          }}
+        }} else {{
+          const exit = document.exitFullscreen || document.webkitExitFullscreen;
+          if (exit) {{ exit.call(document); }}
+          applyFullscreenStyle(false);
+        }}
+      }}
+
+      document.addEventListener('fullscreenchange', () => {{
+        if (!document.fullscreenElement) {{
+          const el = document.getElementById('transit-wrapper');
+          const container = document.getElementById('transit-plot-container');
+          el.style.position = 'relative';
+          el.style.width = 'auto'; el.style.height = 'auto';
+          container.style.height = '{height}px';
+          container.style.width = '100%';
+          transitSetLegendFullWidth(false);
+          transitResizePlot();
+        }}
+      }});
+
+      window.addEventListener('resize', transitResizePlot);
+      setTimeout(transitResizePlot, 200);
+    </script>
+    <script>{EDIT_PANEL_JS}</script>
+    <script>{transit_edit_js}</script>
+    """
+    st.components.v1.html(html_code, height=height + 130, scrolling=False)
+
+
+
+# =========================================================
+# APP
+# =========================================================
 
 def img_to_base64(path):
     try:
@@ -2709,62 +7492,68 @@ def img_to_base64(path):
             return base64.b64encode(f.read()).decode()
     except FileNotFoundError:
         return ""
-img = img_to_base64("KTM Vallery.png")
+img = img_to_base64("image1.jpeg")
 
-# ================= TOP CONTAINER (HERO BANNER) =================
-with st.container(border=True):
-    if img:
-        st.markdown(
-            f"""
-            <style>
-                .hero-container {{
-                    display: flex;
-                    flex-direction: column;
-                    align-items: center;
-                    justify-content: center;
-                    text-align: center;
-                    padding: 1rem;
-                    width: 100%;
-                }}
-                .hero-img {{
-                    max-width: 100%;
-                    max-height: 350px; /* Limits height so it doesn't push data too far down */
-                    border-radius: 12px;
-                    object-fit: cover;
-                    margin-bottom: 1.5rem;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-                }}
-                .hero-title {{
-                    font-size:3rem;
-                    font-weight: 700;
-                    margin-bottom: 0.5rem;
-                    color: inherit; /* Adapts to Streamlit's dark/light theme */
-                }}
-                .hero-subtitle {{
-                    font-size: 1rem;
-                    letter-spacing: 2px;
-                    opacity: 0.8;
-                    font-weight: 500;
-                }}
-            </style>
+# Flags: set to True to bring back the banner / the charts and detail sections.
+SHOW_BANNER = True
+SHOW_EXTRA_SECTIONS = False
 
-            <div class="hero-container">
-                <img src="data:image/png;base64,{img}" class="hero-img">
-                <div class="hero-title">KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown(
-            """
-            <div style="text-align: center; padding: 1rem 0;">
-                <h1>KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</h1>
-                <p style="letter-spacing: 2px; opacity: 0.8;"> • KTM VALLEY  • GTFS FEED 2026</p>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+if SHOW_BANNER:
+    # ================= TOP CONTAINER (HERO BANNER) =================
+    with st.container(border=True):
+        if img:
+            st.markdown(
+                f"""
+                <style>
+                    .hero-container {{
+                        width: 100%;
+                        padding: 0;
+                        margin: 0;
+                        text-align: center;
+                    }}
+                    .hero-img {{
+                        display: block;
+                        width: 100%;
+                        height: 315px;
+                        max-width: none;
+                        max-height: none;
+                        object-fit: cover;
+                        object-position: center;
+                        border-radius: 14px;
+                        margin: 0 0 1.4rem 0;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+                    }}
+                    .hero-title {{
+                        font-size: 3rem;
+                        font-weight: 800;
+                        margin: 0.5rem 0 0.5rem 0;
+                        color: white;
+                    }}
+                    .hero-subtitle {{
+                        font-size: 1rem;
+                        letter-spacing: 2px;
+                        opacity: 0.8;
+                        font-weight: 500;
+                    }}
+                </style>
+
+                <div class="hero-container">
+                    <img src="data:image/png;base64,{img}" class="hero-img">
+                    <div class="hero-title">KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                """
+                <div style="text-align: center; padding: 1rem 0;">
+                    <h1>KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</h1>
+                    <p style="letter-spacing: 2px; opacity: 0.8;"> • KTM VALLEY  • GTFS FEED 2026</p>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
 # ================= LOAD DATA =================
 df_cong = fetch_congestion()
@@ -2867,7 +7656,10 @@ with st.container(border=True):
         </div>
         """, unsafe_allow_html=True)
 
-col_filter, col_map1, col_map2 = st.columns([1.5, 3, 1.5])
+if SHOW_EXTRA_SECTIONS:
+    col_filter, col_map1, col_map2 = st.columns([1.5, 3, 1.5])
+else:
+    col_filter, col_map1 = st.columns([1.2, 3.8])
 
 # =========================================================
 # ROUTE COLORS (GLOBAL COLOR MAP) — single source of truth,
@@ -2881,9 +7673,6 @@ all_routes_df = fetch_routes()
 # FIXED COLOR MAP (name + hex), same assignment used everywhere
 route_color_map, route_color_hex_map = get_route_color_maps()
 
-# ROUTE ID -> ROUTE NAME MAP (for transit map legend, e.g. "Payuntar to Kantipath")
-# ROUTE ID -> AGENCY NAME MAP (new feature: shown alongside the route name
-# in every legend so it's clear which operator runs which route)
 route_agency_map = get_route_agency_map()
 
 route_name_map = {
@@ -2944,7 +7733,8 @@ with col_filter:
 # MAP CONTAINER
 # =========================================================
 with col_map1:
-        with st.expander("Route Map", expanded=True):
+        with st.container(border=True):
+            st.markdown("###### Route Map")
 
             # ================= CHECK ROUTES =================
             if not selected_routes:
@@ -2961,6 +7751,11 @@ with col_map1:
                     key="map_view_mode",
                     label_visibility="collapsed"
                 )
+
+                # Vector landmarks are always shown on the maps (no
+                # dashboard selector -- removal requested via Edit mode).
+                selected_landmarks = list(LANDMARKS.keys())
+                landmark_icon_scale = 2.3  # slightly bigger, still grey/secondary
 
                 if view_mode == "🗺️ Live Map":
 
@@ -3140,13 +7935,31 @@ with col_map1:
                             value=True,
                             key="tm_show_markers",
                         )
-                        tm_schematic = st.checkbox(
-                            "Octilinear schematic",
+                        tm_show_river = st.checkbox(
+                            "Show rivers",
                             value=False,
-                            key="tm_schematic",
-                            help="Snap route segments to horizontal, vertical, "
-                                 "and diagonal legs while keeping stops anchored.",
+                            key="tm_show_river",
+                            help="Draws named rivers and streams underneath "
+                                 "the route lines.",
                         )
+                        tm_show_road = st.checkbox(
+                            "Show roads",
+                            value=True,
+                            key="tm_show_road",
+                            help="Draws the road network (from "
+                                 "data/trunk.geojson) underneath the "
+                                 "route lines.",
+                        )
+
+                    if tm_show_river:
+                        _tm_rivers, _tm_river_error = load_river_paths()
+                        if not _tm_rivers:
+                            st.warning(river_unavailable_message(_tm_river_error))
+
+                    if tm_show_road:
+                        _tm_roads, _tm_road_error = load_road_paths()
+                        if not _tm_roads:
+                            st.warning(road_unavailable_message(_tm_road_error))
 
                     label_options = sorted({
                         re.sub(r"\s+\d+\s*$", "", str(stop_name).strip()).strip()
@@ -3173,20 +7986,22 @@ with col_map1:
                         route_spacing=tm_route_spacing,
                         label_density=tm_label_density,
                         show_stop_markers=tm_show_markers,
-                        schematic=tm_schematic,
                         hidden_label_names=tuple(tm_hidden_labels),
+                        selected_landmarks=tuple(selected_landmarks),
+                        landmark_icon_size_deg=0.0026 * landmark_icon_scale,
+                        show_river=tm_show_river,
+                        show_road=tm_show_road,
                     )
 
-                    st.plotly_chart(
+                    display_transit_map(
                         fig_transit,
-                        use_container_width=True,
-                        config={
-                            "scrollZoom": True,
-                            "responsive": True,
-                            "displayModeBar": True,
-                            "displaylogo": False,
-                        }
+                        selected_routes,
+                        route_name_map,
+                        route_color_hex_map,
+                        route_agency_map=route_agency_map,
                     )
+
+
 
                 else:  # LOOM Map (SVG)
 
@@ -3194,9 +8009,7 @@ with col_map1:
 
                     schematic = st.checkbox(
                         "Schematic (octilinear) layout",
-                        value=False,  # default OFF: shows the geographically
-                                      # accurate shape, which avoids the
-                                      # over-distorted zig-zag look
+                        value=False,  
                         key="loom_schematic_toggle",
                         help=(
                             "On: octi schematic map (metro-style, may distort "
@@ -3205,30 +8018,41 @@ with col_map1:
                         ),
                     )
 
-                    octi_extra_args = ""
-                    if schematic:
-                        with st.container(border=True):
-                            st.markdown("**Advanced: octi tuning flags**")
-                            st.caption(
-                                "octi's default grid/cell size can be too coarse "
-                                "for long, sparse routes, causing the zig-zag "
-                                "distortion. Run the help output below to see "
-                                "your build's real flag names (e.g. for cell "
-                                "size or base grid type), then paste the flag "
-                                "you want into the box."
-                            )
-                            if st.button("Show `octi -h` output", key="octi_help_btn"):
-                                try:
-                                    st.code(get_octi_help())
-                                except Exception as help_error:
-                                    st.error(f"Couldn't fetch octi help: {help_error}")
+                    loom_show_river = st.checkbox(
+                        "Show rivers",
+                        value=False,
+                        key="loom_show_river",
+                        disabled=schematic,
+                        help=(
+                            "Rivers are placed by real coordinates, so they "
+                            "are only drawn on the geographic layout "
+                            "(turn Schematic off)."
+                        ),
+                    )
+                    loom_river_on = bool(loom_show_river and not schematic)
+                    if loom_river_on:
+                        _loom_rivers, _loom_river_error = load_river_paths()
+                        if not _loom_rivers:
+                            st.warning(river_unavailable_message(_loom_river_error))
 
-                            octi_extra_args = st.text_input(
-                                "Extra flags to pass to octi",
-                                value="",
-                                key="octi_extra_args",
-                                placeholder="e.g. -b octilinear <cell-size flag> <value>",
-                            )
+                    loom_show_road = st.checkbox(
+                        "Show roads",
+                        value=True,
+                        key="loom_show_road",
+                        disabled=schematic,
+                        help=(
+                            "Draws the road network (from data/trunk.geojson) "
+                            "with road names, like the Plotly transit map. "
+                            "Roads are placed by real coordinates, so they are "
+                            "only drawn on the geographic layout (turn "
+                            "Schematic off)."
+                        ),
+                    )
+                    loom_road_on = bool(loom_show_road and not schematic)
+                    if loom_road_on:
+                        _loom_roads, _loom_road_error = load_road_paths()
+                        if not _loom_roads:
+                            st.warning(road_unavailable_message(_loom_road_error))
 
                     lw_col, ls_col = st.columns(2)
                     with lw_col:
@@ -3263,19 +8087,29 @@ with col_map1:
                         )
                         loom_label_pad = st.slider(
                             "Label padding (px)",
-                            min_value=0, max_value=400, value=150, step=25,
+                            min_value=0, max_value=300, value=100, step=25,
                             key="loom_label_pad",
                         )
                         loom_label_font_scale = st.slider(
                             "Label font size x",
-                            min_value=0.5, max_value=3.0, value=2.0, step=0.1,
+                            min_value=0.75, max_value=4.0, value=2.5, step=0.05,
                             key="loom_label_font_scale",
                             help="Multiplies the font size in LOOM station labels.",
                         )
                     else:
-                        loom_label_pad = st.session_state.get("loom_label_pad", 150)
+                        loom_label_pad = st.session_state.get("loom_label_pad", 100)
                         loom_label_font_scale = st.session_state.get(
-                            "loom_label_font_scale", 2.0
+                            "loom_label_font_scale", 1.25
+                        )
+
+                    if schematic and selected_landmarks:
+                        st.info(
+                            "In schematic LOOM mode, landmarks are anchored to "
+                            "their nearest transit stop's actual position on the "
+                            "octilinear layout (real lon/lat can't be placed "
+                            "directly, since octi distorts it). A landmark whose "
+                            "nearest stop isn't identifiable in the rendered map "
+                            "is left off rather than placed somewhere misleading."
                         )
 
                     try:
@@ -3283,17 +8117,35 @@ with col_map1:
                             svg = generate_loom_svg(
                                 tuple(selected_routes),
                                 schematic=schematic,
-                                octi_extra_args=octi_extra_args,
                                 line_width=loom_line_width,
                                 line_spacing=loom_line_spacing,
                                 label_pad=loom_label_pad,
                                 label_font_scale=loom_label_font_scale,
+                                selected_landmarks=tuple(selected_landmarks),
+                                landmark_icon_size=28 * landmark_icon_scale,
+                                show_river=loom_river_on,
+                                show_road=loom_road_on,
+                                landmark_layout_sig=landmark_layout_signature(),
+                            )
+
+                        if loom_road_on and 'class="loom-road"' not in svg:
+                            st.info(
+                                "No road could be placed on this map (the "
+                                "layout couldn't be aligned reliably)."
+                            )
+
+                        if loom_river_on and 'class="loom-river"' not in svg:
+                            st.info(
+                                "No river could be placed on this map "
+                                "(none in this area, or the layout couldn't "
+                                "be aligned reliably)."
                             )
 
                         display_loom_svg(
                             svg,
                             selected_routes,
                             route_name_map,
+                            route_color_hex_map,
                             route_agency_map,
                         )
                         st.success("LOOM map generated successfully.")
@@ -3301,6 +8153,10 @@ with col_map1:
                         st.error("LOOM map generation failed.")
                         st.exception(error)
 
+
+# Everything below (charts, route details, congestion) stays hidden
+if not SHOW_EXTRA_SECTIONS:
+    st.stop()
 
 # =========================================================
 # CHART CONTAINER
@@ -3449,8 +8305,6 @@ with left_container:
             """)
 
             m_preview = folium.Map(location=[27.7, 85.3], zoom_start=12, tiles=None)
-            # OpenStreetMap doesn't need an API key (CartoDB now returns a
-            # 'API key required' error image without one)
             folium.TileLayer("OpenStreetMap", name="OpenStreetMap", show=True).add_to(m_preview)
             geom = route_geom(selected_route_id)
 

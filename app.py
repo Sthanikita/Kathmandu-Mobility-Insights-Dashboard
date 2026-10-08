@@ -499,10 +499,10 @@ def is_major_transit_stop(stop_name):
 # VECTOR LANDMARKS
 # =========================================================
 LANDMARKS = {
-    "Pashupati Temple": {"lat":27.710637, "lon": 85.349527, "svg": "icon/pashupati.svg"},
+    "Pashupati Temple": {"lat":27.710637, "lon": 85.349527, "svg": "icon/pashupati.svg", "scale": 0.6},
     "Dharahara": {"lat": 27.700846100092736, "lon":  85.31200513924873, "svg": "icon/darahara.svg"},
     "Boudhanath Stupa": {"lat": 27.7215, "lon": 85.3620, "svg": "icon/boudhastupa.svg"},
-    "Swayambhunath": {"lat": 27.7149, "lon": 85.2906, "svg": "icon/swayambhustupa1.svg"},
+    "Swayambhunath": {"lat": 27.7149, "lon": 85.2906, "svg": "icon/swayambhustupa1.svg", "scale": 0.6},
     "Tribhuvan International Airport": {"lat": 27.698428, "lon":85.362892, "svg": "icon/vector.svg"},
     "UN Park": {"lat":27.6854334117676, "lon":85.3257565314652, "svg": "icon/ic_baseline-park.svg"},
     "Kathmandu Fun Park": {"lat": 27.701374732249555, "lon": 85.32040843415382,"svg": "icon/park.svg"},
@@ -629,7 +629,7 @@ def uploaded_svg_viewbox(svg_text):
 
 def _svg_landmark_group(record, x, y, size=28):
     name = html.escape(str(record["name"]))
-    s = float(size)
+    s = float(size) * float(record.get("scale", 1.0))
     hx = s * 0.5
     hy = s * 0.5
 
@@ -1086,46 +1086,6 @@ def _separate_landmark_icons(placements, icon_size, segments, max_push):
     return moved_any
 
 
-def _plotly_landmark_path(record, size_deg=0.0019):
-    lat, lon = float(record["lat"]), float(record["lon"])
-    sx = size_deg / max(math.cos(math.radians(lat)), 0.2)
-    sy = size_deg
-    hx, hy = sx*0.5, sy*0.5
-    x, y = lon, lat
-    kind = record.get("kind", "monument")
-
-    if kind == "tower":
-        return (
-            f"M {x-hx*.32},{y+hy*.95} L {x+hx*.32},{y+hy*.95} "
-            f"L {x+hx*.22},{y-hy*.25} L {x-hx*.22},{y-hy*.25} Z "
-            f"M {x-hx*.38},{y-hy*.45} L {x+hx*.38},{y-hy*.45} "
-            f"L {x+hx*.38},{y-hy*.25} L {x-hx*.38},{y-hy*.25} Z "
-            f"M {x},{y-hy*.95} L {x-hx*.35},{y-hy*.42} L {x+hx*.35},{y-hy*.42} Z"
-        )
-    if kind == "stupa":
-        return (
-            f"M {x-hx*.72},{y+hy*.58} Q {x},{y+.02*hy} {x+hx*.72},{y+hy*.58} "
-            f"L {x+hx*.55},{y+hy*.80} L {x-hx*.55},{y+hy*.80} Z "
-            f"M {x-hx*.50},{y-hy*.18} A {hx*.50},{hy*.50} 0 1 0 "
-            f"{x+hx*.50},{y-hy*.18} A {hx*.50},{hy*.50} 0 1 0 {x-hx*.50},{y-hy*.18} Z"
-        )
-    if kind == "park":
-        return (
-            f"M {x},{y-hy*.75} A {hx*.75},{hy*.75} 0 1 0 {x},{y+hy*.75} "
-            f"A {hx*.75},{hy*.75} 0 1 0 {x},{y-hy*.75} Z "
-            f"M {x},{y+hy*.50} L {x},{y-hy*.25} "
-            f"M {x},{y-hy*.05} L {x-hx*.35},{y-hy*.38} "
-            f"M {x},{y+hy*.10} L {x+hx*.34},{y-hy*.18}"
-        )
-    if kind == "temple":
-        return (
-            f"M {x},{y-hy*.95} L {x-hx*.72},{y-hy*.05} L {x+hx*.72},{y-hy*.05} Z "
-            f"M {x-hx*.42},{y-hy*.02} L {x+hx*.42},{y-hy*.02} "
-            f"L {x+hx*.42},{y+hy*.76} L {x-hx*.42},{y+hy*.76} Z"
-        )
-    return f"M {x},{y-hy*.72} L {x+hx*.72},{y} L {x},{y+hy*.72} L {x-hx*.72},{y} Z"
-
-
 def _point_segment_dist_and_normal(px, py, ax, ay, bx, by):
     """Shortest distance from point (px,py) to segment (a->b), plus a unit
     vector pointing from the segment out towards the point (used to push a
@@ -1219,12 +1179,6 @@ def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.002
     segments = _collect_route_line_segments(fig)
 
     for record in get_landmark_records(selected_landmarks):
-        kind = record.get("kind", "monument")
-        stroke = {
-            "temple": "#7c3aed", "tower": "#dc2626", "stupa": "#ea580c",
-            "park": "#16a34a", "monument": "#1d4ed8",
-        }.get(kind, "#1d4ed8")
-
         true_lon, true_lat = float(record["lon"]), float(record["lat"])
         # Nudge the icon off any route line it would otherwise touch --
         # same collision handling the LOOM map uses (_clear_landmark_of_lines
@@ -1242,35 +1196,26 @@ def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.002
                 layer="above",
             )
 
-        placed_record = dict(record, lon=icon_lon, lat=icon_lat)
-
         custom_svg = get_landmark_custom_svg(record)
         if custom_svg:
-            # Longitude degrees are narrower than latitude degrees away
-            # from the equator, so widen sizex to keep the icon visually
-            # square -- same correction _plotly_landmark_path() uses.
-            sizex = icon_size_deg / max(math.cos(math.radians(icon_lat)), 0.2)
-            sizey = icon_size_deg
-            fig.add_layout_image(
-                dict(
-                    source=landmark_svg_data_uri(custom_svg),
-                    xref="x", yref="y",
-                    x=icon_lon, y=icon_lat,
-                    xanchor="center", yanchor="middle",
-                    sizex=sizex, sizey=sizey,
-                    sizing="contain",
-                    layer="above",
-                )
-            )
+            landmark_svg = custom_svg
         else:
-            fig.add_shape(
-                type="path",
-                path=_plotly_landmark_path(placed_record),
+            landmark_svg = (
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+                f'{_svg_landmark_group(record, 50.0, 50.0, 80.0)}</svg>'
+            )
+        sizex = icon_size_deg / max(math.cos(math.radians(icon_lat)), 0.2)
+        fig.add_layout_image(
+            dict(
+                source=landmark_svg_data_uri(landmark_svg),
                 xref="x", yref="y",
-                line=dict(color=stroke, width=2.5),
-                fillcolor="white",
+                x=icon_lon, y=icon_lat,
+                xanchor="center", yanchor="middle",
+                sizex=sizex, sizey=icon_size_deg,
+                sizing="contain",
                 layer="above",
             )
+        )
         # Name label: hidden by default, revealed only when the icon is
         # touched/tapped (mobile) or hovered (desktop) -- a real click-to-
         # toggle needs custom JS wired into the embedded plot HTML, but an
@@ -3814,6 +3759,16 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
         agency = (route_agency_map or {}).get(route_id, "Unknown Agency")
         legend_groups.setdefault(agency, []).append(route_id)
 
+    # Dimensions of the RAW map SVG (map only, no title/legend). These
+    # drive the on-screen viewer's aspect ratio so the zoom only ever
+    # scales the map -- the title and legend are static HTML around it.
+    _mw_match = re.search(r'width="([\d.]+)', svg)
+    _mh_match = re.search(r'height="([\d.]+)', svg)
+    loom_map_w = float(_mw_match.group(1)) if _mw_match else 1200.0
+    loom_map_h = float(_mh_match.group(1)) if _mh_match else 800.0
+
+    viewer_title = "Transit Map of Kathmandu Valley"
+
     # Column-per-route legend: each route is its own fixed-width column
     # (agency name above the swatch + route name), flowing left-to-right
     # and wrapping onto new rows. Long route names wrap inside their own
@@ -3885,7 +3840,8 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
 
     html_code = f"""
     <div id="loom-wrapper" style="position:relative; background:#ffffff;
-         border-radius:8px; overflow:hidden; border:1px solid #ddd;">
+         border-radius:8px; overflow:hidden; border:1px solid #ddd;
+         display:flex; flex-direction:column;">
       <style>
         /* Make the LOOM SVG itself fill the wrapper width so the map
            renders as a wide frame, not a small fixed-width image. */
@@ -3915,13 +3871,32 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
                        border:1px solid #ccc; background:#fff; margin-left:auto;">
                 ⛶ Full Screen</button>
       </div>
-     <div id="loom-scroll" style="position:relative; overflow:auto; width:100%; height:760px;
-         background:#fff; padding:24px 28px 24px 28px; box-sizing:border-box;">
+      <div id="loom-title" style="text-align:center; padding:12px 20px 4px;
+           font-family:Arial,sans-serif; font-size:28px; font-weight:700;
+           color:#111111; flex:0 0 auto;">
+        {html.escape(viewer_title)}
+      </div>
+     <div id="loom-scroll" style="position:relative; overflow:auto; width:100%; flex:1 1 auto;
+         min-height:0; background:#fff; padding:24px 28px 24px 28px; box-sizing:border-box;">
         <div id="loom-img"
              style="display:block; width:100%; max-width:100%; margin:0 auto;
                     transform-origin:0 0; transition:transform 0.15s ease;
                     cursor:grab; user-select:none; touch-action:none;">
-          {composite_svg}
+          {svg}
+        </div>
+      </div>
+      <div id="loom-legend" style="display:flex; gap:26px; align-items:flex-start;
+           flex-wrap:wrap; padding:12px 28px 16px; background:#fafafa;
+           border-top:1px solid #e5e7eb; box-sizing:border-box; flex:0 0 auto;">
+        <div style="min-width:150px;">
+          <div style="font-weight:700; font-size:15px; margin:0 0 6px; padding:0;
+                      color:#111; font-family:Arial,sans-serif;">Routes</div>
+          {legend_items}
+        </div>
+        <div style="min-width:130px; border-left:1px solid #ddd; padding-left:16px;">
+          <div style="font-weight:700; font-size:15px; margin:0 0 6px; padding:0;
+                      color:#111; font-family:Arial,sans-serif;">Symbols</div>
+          {symbol_items}
         </div>
       </div>
     </div>
@@ -3930,11 +3905,10 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
       // with no extra title or legend baked in.
       const loomCompositeSvgDataUrl = "data:image/svg+xml;base64,{composite_b64}";
 
-      // The composite's own aspect ratio (map + title + legend), used
-      // below to size the viewer so the whole map is visible on load
-      // instead of forcing a scroll to see the bottom of it.
-      const LOOM_COMPOSITE_W = {composite_w};
-      const LOOM_COMPOSITE_H = {composite_h};
+      // The RAW map's own aspect ratio (map only -- the title above and
+      // the legend below are static HTML that never zoom).
+      const LOOM_MAP_W = {loom_map_w};
+      const LOOM_MAP_H = {loom_map_h};
 
       // Grow (or shrink) #loom-scroll so the composite renders at its
       // natural, unzoomed height within the current width -- capped so
@@ -3951,8 +3925,14 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
         // min-width), so measure the image's real rendered width rather
         // than assuming it matches the scroll container.
         const imgW = img.getBoundingClientRect().width || (scrollEl.clientWidth - 56);
-        const naturalH = imgW * (LOOM_COMPOSITE_H / LOOM_COMPOSITE_W);
-        const capH = window.innerHeight * (isFs ? 0.92 : 0.85);
+        const naturalH = imgW * (LOOM_MAP_H / LOOM_MAP_W);
+        // Reserve room for the static title and legend so the map area
+        // gets whatever is left inside the cap.
+        const titleEl = document.getElementById('loom-title');
+        const legendEl = document.getElementById('loom-legend');
+        const chromeH = (titleEl ? titleEl.offsetHeight : 0)
+          + (legendEl ? legendEl.offsetHeight : 0) + 8;
+        const capH = Math.max(360, window.innerHeight * (isFs ? 0.92 : 0.85) - chromeH);
         scrollEl.style.height = Math.max(360, Math.min(naturalH + 94, capH)) + 'px';
       }}
 
@@ -4252,7 +4232,7 @@ def display_loom_svg(svg, selected_routes, route_name_map, route_agency_map=None
     </script>
 
     """
-    st.components.v1.html(html_code, height=830, scrolling=True)
+    st.components.v1.html(html_code, height=900, scrolling=False)
 
 
 def build_map_legend_html(selected_routes, route_name_map, route_color_hex_map,
