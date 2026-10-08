@@ -4848,11 +4848,15 @@ with st.container(border=True):
                     width: 100%;
                 }}
                 .hero-img {{
-                    max-width: 100%;
-                    max-height: 350px; /* Limits height so it doesn't push data too far down */
-                    border-radius: 12px;
+                    display: block;
+                    width: 100%;
+                    height: 315px;
+                    max-width: none;
+                    max-height: none;
                     object-fit: cover;
-                    margin-bottom: 1.5rem;
+                    object-position: center;
+                    border-radius: 14px;
+                    margin: 0 0 1.4rem 0;
                     box-shadow: 0 4px 12px rgba(0,0,0,0.1);
                 }}
                 .hero-title {{
