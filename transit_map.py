@@ -7538,7 +7538,10 @@ if SHOW_BANNER:
                 </style>
 
                 <div class="hero-container">
-                    <img src="data:image/png;base64,{img}" class="hero-img">
+                    <img src="data:image/jpeg;base64,{img}" class="hero-img"
+                    style="display:block; width:100%; height:315px; max-width:none;
+                object-fit:cover; object-position:center;
+                border-radius:14px; margin:0 0 1.4rem 0;">
                     <div class="hero-title">KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</div>
                 </div>
                 """,
