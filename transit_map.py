@@ -513,7 +513,7 @@ LANDMARKS = {
         "Chauni": {"lat": 27.707246, "lon": 85.293175, "svg": "new_icon/chaune.svg","anchor": "Swayambhu Bus Stop1", "anchor2": "Sitapaila Stop", "t": 0.5, "side": 1, "offset": 1.0},
         "Gopi Krishna Hall": {"lat": 27.724308, "lon": 85.351880, "svg": "new_icon/cinema_hall.svg", "scale": 0.55, "anchor": "Sukedhara2", "anchor2": "Gopi Krishna Bus Stop", "t": 0.24, "side": 1, "offset": 1.2},
         "Bhandarkhal": {"lat": 27.708326, "lon": 85.337344, "svg": "new_icon/Bhandarkhal.svg", "scale": 0.95, "anchor": "Gaushala", "anchor2": "Jaya Bageshwori", "t": 0.24, "side": -1, "offset": 1.2},
-        "Kamal Pokhari": {"lat": 27.709880, "lon": 85.329843, "svg": "new_icon/Kamal Pokhari.svg", "scale": 0.55}
+        "Kamal Pokhari": {"lat": 27.709880, "lon": 85.329843, "svg": "new_icon/Kamal Pokhari.svg", "scale": 0.55, "anchor":"Nag Pokhari Bus Stand", "side": 1, "offset": 1.1}
 }
 DEFAULT_LANDMARKS = tuple(LANDMARKS.keys())
 
@@ -558,10 +558,9 @@ def get_landmark_records(selected_landmarks):
 # MAP DATA LAYERS: RIVERS + ROADS (your own GeoJSON files)
 # =========================================================
 
-RIVER_COLOR = "#a8d4f2"
+RIVER_COLOR = "#d3edfc"
 RIVER_LABEL_COLOR = "#2f6fa3"
 RIVER_BBOX = (27.55, 85.15, 27.85, 85.60)  # south, west, north, east
-RIVER_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 # -------------------------------------------------------------------
 # CARTOGRAPHIC ROAD STYLE FOR THE TRANSIT MAP
@@ -572,35 +571,30 @@ ROAD_SURFACE_COLOR = "#f4f4f4"   # light surface so the road edges read clearly
 
 ROAD_CASING_COLORS = {
     "primary":   "#d1cdcd",   # primary: neutral grey outline
-    "secondary": "#eecb58",   # trunk:   golden outline
+    "trunk": "#eecb58",   # trunk:   golden outline
 }
 ROAD_SURFACE_COLORS = {
     "primary":   "#f4f4f4",   # primary: light grey/white fill
-    "secondary": "#fefae8",   # trunk:   pale yellow fill
+    "trunk": "#fefae8",   # trunk:   pale yellow fill
 }
 
-# Screen-pixel widths. Much thinner than before so neighbouring roads no
-# longer fuse into one grey mass.
+
 ROAD_CASING_WIDTH = {
     "primary": 10.0,     # primary roads
-    "secondary": 16.0,  # trunk roads (wider than primary)
-    "tertiary": 5.5,
-    "other": 4.0,
+    "trunk": 16.0,  # trunk roads (wider than primary)
+
 }
 ROAD_SURFACE_WIDTH = {
     "primary": 8.0,     # primary roads
-    "secondary": 12.0,   # trunk roads (wider than primary)
-    "tertiary": 3.5,
-    "other": 2.5,
+    "trunk": 12.0,   # trunk roads (wider than primary)
+
 }
 
-ROAD_DRAW_ORDER = {"other": 0, "tertiary": 1, "primary": 2, "secondary": 3}
+ROAD_DRAW_ORDER = {"trunk": 0, "primary": 1}
 ROAD_COLOR = ROAD_SURFACE_COLOR
 ROAD_HIERARCHY_WIDTH = ROAD_SURFACE_WIDTH
 ROAD_BBOX = (27.55, 85.15, 27.85, 85.60)  # south, west, north, east
 
-RIVER_ALLOW_OSM_FALLBACK = False   # True = download from OSM when no local file
-ROAD_ALLOW_OSM_FALLBACK = False
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -621,9 +615,8 @@ RIVER_DATA_FILES = _data_candidates(
      "kathmandu_rivers.json",
 )
 ROAD_DATA_FILES = _data_candidates(
-     "kathmandu_road.geojson", "kathmandu_road.gpkg",
+     "kathmandu_road.geojson",
 )
-RIVER_CACHE_FILE = os.path.join(_SCRIPT_DIR, "data", "kathmandu_rivers_osm_cache.json")
 
 
 def _file_signature(paths):
@@ -728,10 +721,9 @@ def _read_json_file(path):
 def _road_hierarchy(road_class, road_name=""):
     """Map a road class tag onto a coarse bucket (picks the line width only)."""
     text = f"{road_class} {road_name}".lower()
-    # Trunk roads get their own (wider) width bucket. It reuses the
-    # "secondary" slot because this dataset only has trunk + primary roads.
+    # Keep trunk roads distinct so they use their wider dedicated style.
     if "trunk" in str(road_class or "").lower():
-        return "secondary"
+        return "trunk"
     if any(k in text for k in ("primary", "trunk", "motorway", "frn", "f0", "f1", "highway")):
         return "primary"
     if "secondary" in text or "rrn" in text:
@@ -782,37 +774,6 @@ def _parse_road_data(obj):
     return tuple(roads)
 
 
-def _fetch_roads_from_overpass():
-    """Optional fallback: named roads in the valley from OpenStreetMap."""
-    import urllib.parse
-    import urllib.request
-
-    s, w, n, e = ROAD_BBOX
-    query = (
-        "[out:json][timeout:120];"
-        f'way["highway"~"^(primary|secondary|tertiary|trunk|residential)$"]["name"]({s},{w},{n},{e});'
-        "out geom;"
-    )
-    request = urllib.request.Request(
-        RIVER_OVERPASS_URL,
-        data=urllib.parse.urlencode({"data": query}).encode("utf-8"),
-        headers={"User-Agent": "kathmandu-transit-map/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-
-    features = []
-    for el in payload.get("elements", []):
-        tags = el.get("tags") or {}
-        coords = [[g["lon"], g["lat"]] for g in (el.get("geometry") or [])]
-        features.append({
-            "properties": {"name": tags.get("name:en") or tags.get("name"),
-                           "road_class": tags.get("highway")},
-            "geometry": {"type": "LineString", "coordinates": coords},
-        })
-    return {"type": "FeatureCollection", "features": features}
-
-
 def _read_road_gpkg(path):
     """GeoPackage roads (needs geopandas). Returns a tuple, maybe empty."""
     import sqlite3
@@ -861,14 +822,9 @@ def _cached_road_paths(signature):
             )
         return roads
 
-    if not ROAD_ALLOW_OSM_FALLBACK:
-        raise FileNotFoundError(
-            "no local road file found. Looked for: " + ", ".join(ROAD_DATA_FILES)
-        )
-    roads = _parse_road_data(_fetch_roads_from_overpass())
-    if not roads:
-        raise RuntimeError("no roads returned for the Kathmandu Valley area")
-    return roads
+    raise FileNotFoundError(
+        "no local road file found. Looked for: " + ", ".join(ROAD_DATA_FILES)
+    )
 
 
 def load_road_paths():
@@ -989,36 +945,6 @@ def _parse_river_data(obj):
     return rivers
 
 
-def _fetch_rivers_from_overpass():
-    import urllib.parse
-    import urllib.request
-
-    s, w, n, e = RIVER_BBOX
-    query = (
-        "[out:json][timeout:60];"
-        f'way["waterway"~"^(river|stream)$"]["name"]({s},{w},{n},{e});'
-        "out geom;"
-    )
-    request = urllib.request.Request(
-        RIVER_OVERPASS_URL,
-        data=urllib.parse.urlencode({"data": query}).encode("utf-8"),
-        headers={"User-Agent": "kathmandu-transit-map/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=90) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-
-    rivers = []
-    for el in payload.get("elements", []):
-        tags = el.get("tags") or {}
-        coords = [[g["lon"], g["lat"]] for g in (el.get("geometry") or [])]
-        rivers.append({
-            "name": tags.get("name:en") or tags.get("name"),
-            "kind": tags.get("waterway"),
-            "coords": coords,
-        })
-    return rivers
-
-
 @st.cache_data(show_spinner="Loading rivers...")
 def _cached_river_paths(signature):
     # `signature` = ((path, mtime), ...) so editing the file busts the cache.
@@ -1032,21 +958,9 @@ def _cached_river_paths(signature):
             )
         return tuple(rivers)
 
-    if not RIVER_ALLOW_OSM_FALLBACK:
-        raise FileNotFoundError(
-            "no local river file found. Looked for: " + ", ".join(RIVER_DATA_FILES)
-        )
-    raw = _fetch_rivers_from_overpass()
-    rivers = _parse_river_data(raw)
-    if not rivers:
-        raise RuntimeError("no named rivers returned for the Kathmandu Valley area")
-    try:
-        os.makedirs(os.path.dirname(RIVER_CACHE_FILE), exist_ok=True)
-        with open(RIVER_CACHE_FILE, "w", encoding="utf-8") as fh:
-            json.dump(raw, fh)
-    except OSError:
-        pass  # cache file is a convenience only
-    return tuple(rivers)
+    raise FileNotFoundError(
+        "no local river file found. Looked for: " + ", ".join(RIVER_DATA_FILES)
+    )
 
 
 def load_river_paths():
@@ -1064,10 +978,15 @@ def river_unavailable_message(error_message=""):
         + ". Put `kathmandu_river.geojson` in the `data` folder next to the app."
     )
 
-
 # ---------------------------------------------------------
 # Transit Map (Plotly): rivers in lon/lat data coordinates
 # ---------------------------------------------------------
+def _plotly_trace_uid(namespace, identity):
+    """Build a stable, CSS-selector-safe UID for Plotly traces."""
+    identity_hash = hashlib.sha256(str(identity).encode("utf-8")).hexdigest()
+    return f"{namespace}-{identity_hash}"
+
+
 def add_rivers_to_transit_figure(fig, lon_range, lat_range):
     """Draw rivers UNDER the route lines. Only the part of each river
     inside the visible lon/lat window is sent to the browser."""
@@ -1108,7 +1027,7 @@ def add_rivers_to_transit_figure(fig, lon_range, lat_range):
             hoverinfo="text",
             hovertext=name,
             showlegend=False,
-            uid=f"river-{kind}-{name}",
+            uid=_plotly_trace_uid("river", f"{kind}-{name}"),
         ))
     added = len(fig.data) - n_before
     if added:
@@ -1190,7 +1109,7 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
     for (name, hierarchy), pts in sorted(
             grouped.items(),
             key=lambda kv: ROAD_DRAW_ORDER.get(kv[0][1], 0)):
-        base = ROAD_CASING_WIDTH.get(hierarchy, ROAD_CASING_WIDTH["other"])
+        base = ROAD_CASING_WIDTH.get(hierarchy, ROAD_CASING_WIDTH["primary"])
         width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
         fig.add_trace(go.Scatter(
             x=[p[0] for p in pts],
@@ -1204,7 +1123,7 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
             hoverinfo="text",
             hovertext=name,
             showlegend=False,
-            uid=f"road-casing-{hierarchy}-{name}",
+            uid=_plotly_trace_uid("road-casing", f"{hierarchy}-{name}"),
         ))
 
     # ------------------------------------------------------------
@@ -1213,7 +1132,7 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
     for (name, hierarchy), pts in sorted(
             grouped.items(),
             key=lambda kv: ROAD_DRAW_ORDER.get(kv[0][1], 0)):
-        base = ROAD_SURFACE_WIDTH.get(hierarchy, ROAD_SURFACE_WIDTH["other"])
+        base = ROAD_SURFACE_WIDTH.get(hierarchy, ROAD_SURFACE_WIDTH["primary"])
         width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
         fig.add_trace(go.Scatter(
             x=[p[0] for p in pts],
@@ -1227,7 +1146,7 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
             hoverinfo="text",
             hovertext=name,
             showlegend=False,
-            uid=f"road-surface-{hierarchy}-{name}",
+            uid=_plotly_trace_uid("road-surface", f"{hierarchy}-{name}"),
         ))
 
     # ------------------------------------------------------------
@@ -1504,7 +1423,7 @@ def build_road_svg_markup(svg, route_stops, roads, line_width=40):
             roads, key=lambda r: ROAD_DRAW_ORDER.get(r[1], 0)):
         escaped = _escape_title(name)
         xy = [to_xy(lon, lat) for lon, lat in pts]
-        base = casing_width.get(hierarchy, casing_width["other"])
+        base = casing_width.get(hierarchy, casing_width["primary"])
         width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
         for run in _clip_polyline_to_box(xy, box):
             body.append(
@@ -1519,7 +1438,7 @@ def build_road_svg_markup(svg, route_stops, roads, line_width=40):
             roads, key=lambda r: ROAD_DRAW_ORDER.get(r[1], 0)):
         escaped = _escape_title(name)
         xy = [to_xy(lon, lat) for lon, lat in pts]
-        base = surface_width.get(hierarchy, surface_width["other"])
+        base = surface_width.get(hierarchy, surface_width["primary"])
         width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
         for run in _clip_polyline_to_box(xy, box):
             body.append(
@@ -3241,7 +3160,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                 legendgroup=agency_group,
                 showlegend=True,
                 hoverinfo="skip",
-                uid=f"agency-{route_id}",
+                uid=_plotly_trace_uid("agency", route_id),
             ))
 
         legend_name = html.escape(str(route_label))
@@ -3269,7 +3188,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             name=legend_name,
             hoverinfo="skip",
             legendgroup=agency_group,
-            uid=f"line-{route_id}",
+            uid=_plotly_trace_uid("line", route_id),
             cliponaxis=False,
         ))
 
@@ -3302,7 +3221,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             showlegend=False,
             legendgroup=agency_group,
             cliponaxis=False,
-            uid=f"stops-{route_id}",
+            uid=_plotly_trace_uid("stops", route_id),
         ))
 
     # ------------------------------------------------------------
@@ -3391,7 +3310,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                 showlegend=False,
                 legendgroup=shared_legendgroup,
                 cliponaxis=False,
-                uid=f"shared-center-{name_key}",
+                uid=_plotly_trace_uid("shared-center", name_key),
             ))
 
         if label_density != "Major exchanges only" or is_major_transit_stop(label_name):
