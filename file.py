@@ -567,47 +567,46 @@ def is_major_transit_stop(stop_name):
 # VECTOR LANDMARKS
 # =========================================================
 _KTM_LANDMARKS = {
-    "Pashupati Temple": {"lat":27.710637, "lon": 85.349527, "svg": "new_icon/pashupati.svg", "scale": 0.95, "anchor": "Gaushala", "anchor2": "Pingalsthan Gaushala", "t": 0.5, "side": 1, "offset": 1.2},
-        "Dharahara": {"lat": 27.701755, "lon": 85.310071, "svg": "new_icon/Dharahara.svg", "anchor": "Shahid Gate Bus Stop", "side": -1, "offset": 0.85},
-        "Boudhanath Stupa": {"lat": 27.722685, "lon":  85.359812, "svg": "new_icon/boudhastupa.svg", "scale": 0.55, "anchor": "Chabahil Bus Station2", "anchor2": "Chabahil Bus Stop1", "t": 0.58, "side": 1, "offset": 0.8},
-        "Swayambhunath": {"lat":27.714522, "lon": 85.288690, "svg": "new_icon/Swayambhu.svg", "anchor": "Thulo Bharyang1", "anchor2": "Swayambhu Bus Stop1", "t": 0.5, "side": 1, "offset": 0.75},
-        "Tribhuvan International Airport": {"lat": 27.696670, "lon": 85.360190, "svg": "new_icon/Airport.svg","scale": 0., "anchor": "Sinamangal Chowk", "anchor2": "Koteshwor Bus Stop3", "t": 0.65, "side": 1, "offset": 1.2},
-        "UN Park": {"lat":27.6854334117676, "lon":85.3257565314652, "svg": "new_icon/UN PARK.svg", "anchor": "Kupondole Bus Stop1", "anchor2": "Krishna Galli Bus Stop2", "t": 0.6, "side": -1, "offset": 0.75},
-        "Kathmandu Fun Park": {"lat": 27.700810, "lon": 85.328657, "svg": "new_icon/KATHMANDU FUN PARK.svg", "anchor": "Tundikhel Bus Stop", "side": 1, "offset": 1.5},
-        "ZOO": {"lat": 27.674287, "lon": 85.309118, "svg": "new_icon/ZOO.svg", "anchor": "Satdobato_Lagankhel Road", "side": -1, "offset": 1.2},
-        "Narayanhiti Palace Museum": {"lat": 27.71491540425667, "lon": 85.31810084081023, "svg": "new_icon/Narayanhiti Durbar Museum.svg","scale": 0.6, "anchor": "Narayanhiti Marg Bus Stop", "anchor2": "Ramayan Barahi", "t": 0, "side": -1, "offset": 0.95},
-        "Bir Hospital": {"lat": 27.706729, "lon": 85.310652, "svg": "new_icon/Bir Hospital.svg", "scale": 0.6, "anchor": ["Ratna Park Bus Station1", "Bir Hospital Bus Stop"], "anchor2": "Nac Bus Stop", "t": 0.5, "side": -1, "offset": 1.5},
-        "Basantapur  Durbar Square": {"lat": 27.705431, "lon": 85.304379, "svg": "new_icon/BDS 1.svg", "anchor": "Ratna Park Micro Bus Stop", "side": -1, "offset": 1.8},
-        "Patan Durbar Square": {"lat": 27.672660069722838, "lon":  85.32555712962338, "svg": "new_icon/PDS.svg", "anchor": "Ekantakuna1", "side": 1, "offset": 1.0},
-        "Mhepi":{"lat": 27.722499, "lon": 85.303104, "svg": "new_icon/Mehpi.svg", "anchor": "Yerahiti", "anchor2": "Thulo Bharyang1", "t": 0.5, "side": 1, "offset": 0.6},
-        "Macchapokhari Bus Park": {"lat": 27.730661, "lon": 85.310039, "svg": "new_icon/Macchapokhari bus park.svg", "anchor": "Machha Pokhari", "side": -1, "offset": 1.0},
-        "Rani Pokhari":{"lat": 27.70780675, "lon": 85.3153348, "svg": "new_icon/Rani_Pokhari.svg", "scale": 0.448, "anchor": "Lainchaur Bus Station", "anchor2": ["Ratna Park Bus Station1", "Bir Hospital Bus Stop"], "t": 0.68, "side": -1, "offset": 0.75},
-        "Chauni": {"lat": 27.707246, "lon": 85.293175, "svg": "new_icon/chaune.svg","anchor": "Swayambhu Bus Stop1", "anchor2": "Sitapaila Stop", "t": 0.5, "side": 1, "offset": 1.0},
-        "Gopi Krishna Hall": {"lat": 27.724308, "lon": 85.351880, "svg": "new_icon/cinema_hall.svg", "scale": 0.55, "anchor": "Sukedhara2", "anchor2": "Gopi Krishna Bus Stop", "t": 0.24, "side": 1, "offset": 1.2},
-        "Bhandarkhal": {"lat": 27.708326, "lon": 85.337344, "svg": "new_icon/Bhandarkhal.svg", "scale": 0.95, "anchor": "Gaushala", "anchor2": "Jaya Bageshwori", "t": 0.24, "side": -1, "offset": 1.2},
-        "Kamal Pokhari": {"lat": 27.709880, "lon": 85.329843, "svg": "new_icon/Kamal Pokhari.svg", "scale": 0.55, "anchor":"Nag Pokhari Bus Stand", "side": 1, "offset": 1.1}
+    "Pashupati Temple": {"lat":27.710637, "lon": 85.349527, "svg": "Kathmandu_Pokhara_icon/pashupati.svg", "scale": 0.95, "anchor": "Gaushala", "anchor2": "Pingalsthan Gaushala", "t": 0.5, "side": 1, "offset": 1.2},
+        "Dharahara": {"lat": 27.701755, "lon": 85.310071, "svg": "Kathmandu_Pokhara_icon/Dharahara.svg", "anchor": "Shahid Gate Bus Stop", "side": -1, "offset": 0.85},
+        "Boudhanath Stupa": {"lat": 27.722685, "lon":  85.359812, "svg": "Kathmandu_Pokhara_icon/boudhastupa.svg", "scale": 0.55, "anchor": "Chabahil Bus Station2", "anchor2": "Chabahil Bus Stop1", "t": 0.58, "side": 1, "offset": 0.8},
+        "Swayambhunath": {"lat":27.714522, "lon": 85.288690, "svg": "Kathmandu_Pokhara_icon/Swayambhu.svg", "anchor": "Thulo Bharyang1", "anchor2": "Swayambhu Bus Stop1", "t": 0.5, "side": 1, "offset": 0.75},
+        "Tribhuvan International Airport": {"lat": 27.696670, "lon": 85.360190, "svg": "Kathmandu_Pokhara_icon/Airport.svg","scale": 0., "anchor": "Sinamangal Chowk", "anchor2": "Koteshwor Bus Stop3", "t": 0.65, "side": 1, "offset": 1.2},
+        "UN Park": {"lat":27.6854334117676, "lon":85.3257565314652, "svg": "Kathmandu_Pokhara_icon/UN PARK.svg", "anchor": "Kupondole Bus Stop1", "anchor2": "Krishna Galli Bus Stop2", "t": 0.6, "side": -1, "offset": 0.75},
+        "Kathmandu Fun Park": {"lat": 27.700810, "lon": 85.328657, "svg": "Kathmandu_Pokhara_icon/KATHMANDU FUN PARK.svg", "anchor": "Tundikhel Bus Stop", "side": 1, "offset": 1.5},
+        "ZOO": {"lat": 27.674287, "lon": 85.309118, "svg": "Kathmandu_Pokhara_icon/ZOO.svg", "anchor": "Satdobato_Lagankhel Road", "side": -1, "offset": 1.2},
+        "Narayanhiti Palace Museum": {"lat": 27.71491540425667, "lon": 85.31810084081023, "svg": "Kathmandu_Pokhara_icon/Narayanhiti Durbar Museum.svg","scale": 0.6, "anchor": "Narayanhiti Marg Bus Stop", "anchor2": "Ramayan Barahi", "t": 0, "side": -1, "offset": 0.95},
+        "Bir Hospital": {"lat": 27.706729, "lon": 85.310652, "svg": "Kathmandu_Pokhara_icon/Bir Hospital.svg", "scale": 0.6, "anchor": ["Ratna Park Bus Station1", "Bir Hospital Bus Stop"], "anchor2": "Nac Bus Stop", "t": 0.5, "side": -1, "offset": 1.5},
+        "Basantapur  Durbar Square": {"lat": 27.705431, "lon": 85.304379, "svg": "Kathmandu_Pokhara_icon/BDS 1.svg", "anchor": "Ratna Park Micro Bus Stop", "side": -1, "offset": 1.8},
+        "Patan Durbar Square": {"lat": 27.672660069722838, "lon":  85.32555712962338, "svg": "Kathmandu_Pokhara_icon/PDS.svg", "anchor": "Ekantakuna1", "side": 1, "offset": 1.0},
+        "Mhepi":{"lat": 27.722499, "lon": 85.303104, "svg": "Kathmandu_Pokhara_icon/Mehpi.svg", "anchor": "Yerahiti", "anchor2": "Thulo Bharyang1", "t": 0.5, "side": 1, "offset": 0.6},
+        "Macchapokhari Bus Park": {"lat": 27.730661, "lon": 85.310039, "svg": "Kathmandu_Pokhara_icon/Macchapokhari bus park.svg", "anchor": "Machha Pokhari", "side": -1, "offset": 1.0},
+        "Rani Pokhari":{"lat": 27.70780675, "lon": 85.3153348, "svg": "Kathmandu_Pokhara_icon/Rani_Pokhari.svg", "scale": 0.448, "anchor": "Lainchaur Bus Station", "anchor2": ["Ratna Park Bus Station1", "Bir Hospital Bus Stop"], "t": 0.68, "side": -1, "offset": 0.75},
+        "Chauni": {"lat": 27.707246, "lon": 85.293175, "svg": "Kathmandu_Pokhara_icon/chaune.svg","anchor": "Swayambhu Bus Stop1", "anchor2": "Sitapaila Stop", "t": 0.5, "side": 1, "offset": 1.0},
+        "Gopi Krishna Hall": {"lat": 27.724308, "lon": 85.351880, "svg": "Kathmandu_Pokhara_icon/cinema_hall.svg", "scale": 0.55, "anchor": "Sukedhara2", "anchor2": "Gopi Krishna Bus Stop", "t": 0.24, "side": 1, "offset": 1.2},
+        "Bhandarkhal": {"lat": 27.708326, "lon": 85.337344, "svg": "Kathmandu_Pokhara_icon/Bhandarkhal.svg", "scale": 0.95, "anchor": "Gaushala", "anchor2": "Jaya Bageshwori", "t": 0.24, "side": -1, "offset": 1.2},
+        "Kamal Pokhari": {"lat": 27.709880, "lon": 85.329843, "svg": "Kathmandu_Pokhara_icon/Kamal Pokhari.svg", "scale": 0.55, "anchor":"Nag Pokhari Bus Stand", "side": 1, "offset": 1.1}
 }
-# Kathmandu landmarks only apply to Kathmandu. Add a _PKR_LANDMARKS dict
-# (Phewa Lake, World Peace Pagoda, ...) and switch it in here for Pokhara.
+
 _PKR_LANDMARKS = {
-    "Amarsingh  Chaur": {"lat": 28.2060955, "lon": 84.0020183, "svg": "new_icon/pokhara_icon/Marsingh chaur.svg", "scale": 0.8},
-    "Begnas Lake":  {"lat": 28.170695426546455, "lon": 84.09182977791524, "svg": "new_icon/pokhara_icon/Begnas_lake.svg","scale":3.5},
-    "Bhadrakali Temple": {"lat":28.213103, "lon":  84.009107, "svg": "new_icon/pokhara_icon/Bhadrakali Mandhir.svg", "scale": 0.5},
-    "Ban":  {"lat": 28.212046, "lon": 84.020190, "svg": "new_icon/pokhara_icon/ban.svg","scale":1.5},
-    "Bokshi Ban": {"lat":28.209412, "lon":  84.031267, "svg": "new_icon/pokhara_icon/Bokshi Ban.svg", "scale": 3.5},
-    "Annapurna Cable Car": {"lat":28.213103, "lon":  84.009107, "svg": "new_icon/pokhara_icon/cABLE CAR.svg", "scale": 0.5},
-    "Fewa Lake": {"lat": 28.218896,  "lon":83.955921, "svg": "new_icon/pokhara_icon/Fewa_lake.svg", "scale": 3.5},
-    "Cinema Hall": {"lat": 28.259924, "lon": 83.968754, "svg": "new_icon/pokhara_icon/cinema_hall.svg", "scale": 0.6},
-    "Manipal Teaching Hospital": {"lat": 28.236398, "lon": 84.001287, "svg": "new_icon/pokhara_icon/Bir Hospital.svg", "scale": 0.8},
-    "Mahendra Cave ": {"lat": 28.271040, "lon":  83.983328, "svg": "new_icon/pokhara_icon/Mahendra_gufa.svg", "scale": 0.8}, 
-    "Bhadrakali Machhapokhari": {"lat": 28.212543, "lon": 84.008892, "svg": "new_icon/pokhara_icon/Bhadrakali Macchhapokhari.svg", "scale": 0.4},
-    "Pokhara Airport": {"lat": 28.198695, "lon": 83.981053, "svg": "new_icon/pokhara_icon/pokhara airport.svg", "scale": 1.5},
-    "Pokhara International Airport": {"lat": 28.186903, "lon": 84.010495, "svg": "new_icon/pokhara_icon/Pokhara Internartional Airport.svg", "scale": 3.5},
-    "Pokhara Rangasala": {"lat": 28.204195, "lon":  83.992230, "svg": "new_icon/pokhara_icon/pokhara rangasala.svg", "scale": 0.8},
-    "Raniban": {"lat": 28.213970, "lon": 83.956100, "svg": "new_icon/pokhara_icon/community_forest.svg", "scale": 2.5},
-    "Rastriya Bank": {"lat": 28.201591, "lon": 83.970260, "svg": "new_icon/pokhara_icon/bank.svg", "scale": 0.8},
-    "Rato Dhanda": {"lat": 28.224456,  "lon": 83.960747, "svg": "new_icon/pokhara_icon/RATO DHANDA.svg", "scale": 1.5},
-    "WRC College": {"lat": 28.258075, "lon": 83.974254, "svg": "new_icon/pokhara_icon/wrc.svg", "scale": 0.6},
+    "Amarsingh  Chaur": {"lat": 28.2060955, "lon": 84.0020183, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/Marsingh chaur.svg", "scale": 0.8},
+    "Begnas Lake":  {"lat": 28.170695426546455, "lon": 84.09182977791524, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/Begnas_lake.svg","scale":3.5},
+    "Bhadrakali Temple": {"lat":28.213103, "lon":  84.009107, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/Bhadrakali Mandhir.svg", "scale": 0.5},
+    "Ban":  {"lat": 28.212046, "lon": 84.020190, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/ban.svg","scale":1.5},
+    "Bokshi Ban": {"lat":28.209412, "lon":  84.031267, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/Bokshi Ban.svg", "scale": 3.5},
+    "Annapurna Cable Car": {"lat":28.213103, "lon":  84.009107, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/cABLE CAR.svg", "scale": 0.5},
+    "Fewa Lake": {"lat": 28.218896,  "lon":83.955921, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/Fewa_lake.svg", "scale": 3.5},
+    "Cinema Hall": {"lat": 28.259924, "lon": 83.968754, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/cinema_hall.svg", "scale": 0.6},
+    "Manipal Teaching Hospital": {"lat": 28.236398, "lon": 84.001287, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/Bir Hospital.svg", "scale": 0.8},
+    "Mahendra Cave ": {"lat": 28.271040, "lon":  83.983328, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/Mahendra_gufa.svg", "scale": 0.8}, 
+    "Bhadrakali Machhapokhari": {"lat": 28.212543, "lon": 84.008892, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/Bhadrakali Macchhapokhari.svg", "scale": 0.4},
+    "Pokhara Airport": {"lat": 28.198695, "lon": 83.981053, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/pokhara airport.svg", "scale": 1.5},
+    "Pokhara International Airport": {"lat": 28.186903, "lon": 84.010495, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/Pokhara Internartional Airport.svg", "scale": 3.5},
+    "Pokhara Rangasala": {"lat": 28.204195, "lon":  83.992230, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/pokhara rangasala.svg", "scale": 0.8},
+    "Raniban": {"lat": 28.213970, "lon": 83.956100, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/community_forest.svg", "scale": 2.5},
+    "Rastriya Bank": {"lat": 28.201591, "lon": 83.970260, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/bank.svg", "scale": 0.8},
+    "Rato Dhanda": {"lat": 28.224456,  "lon": 83.960747, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/RATO DHANDA.svg", "scale": 1.5},
+    "WRC College": {"lat": 28.258075, "lon": 83.974254, "svg": "Kathmandu_Pokhara_icon/pokhara_icon/wrc.svg", "scale": 0.6},
 }
 LANDMARKS_BY_CITY = {
     "Kathmandu": _KTM_LANDMARKS,
@@ -1016,7 +1015,7 @@ def _road_corridor_counts(roads):
 def _corridor_width_multiplier(count):
     """Width scale for a road carrying `count` other roads in its corridor.
     Grows with usage but is capped so the busiest highway doesn't balloon."""
-    return 1.0  # constant width per road class: no stepped edges
+    return 1.0 
 
 
 # ---------------------------------------------------------
@@ -1197,12 +1196,7 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
     n_before = len(fig.data)
 
     # Width scales with how many other roads pass through the same
-    # corridor, so busier shared corridors are drawn wider.
-    # IMPORTANT: keyed by road NAME only (same as build_road_svg_markup
-    # for the LOOM map). Keying by (name, hierarchy) gives overlapping
-    # segments of one corridor different widths -- the wider surface then
-    # bites into the narrower road's casing and the corridor renders with
-    # stepped/notched edges.
+    # corridor, so busier shared corridors are drawn wider
     share_counts = _road_corridor_counts(list(roads))
     count_by_name = {}
     for (name, hierarchy, pts), count in zip(roads, share_counts):
@@ -1974,13 +1968,7 @@ def _extract_svg_polyline_segments(svg):
     for el in root.iter():
         if tag_local(el) != 'path':
             continue
-        # A path counts as a drawn line if it has a visible stroke via
-        # attribute OR inline style. LOOM sometimes carries stroke only in
-        # style="...stroke:#xxxxxx..." or via a CSS class (e.g. on the
-        # <g> wrapper), so checking only the attribute silently missed real
-        # route lines -- which is why landmark icons could still land on
-        # them. Paths with no stroke indication at all are still skipped so
-        # invisible hit-areas / label paths don't create fake obstacles.
+        
         stroke = (el.get('stroke') or '').strip().lower()
         style = (el.get('style') or '').lower()
         style_stroke = re.search(r'stroke\s*:\s*([^;]+)', style)
@@ -2465,9 +2453,7 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
                 cost += 4.0 * (icon_clear - d) / eff_size
         return cost
 
-    # Candidate spots: 8 directions (octilinear-friendly) at a few short
-    # distances. The smallest distance is already far enough that the icon
-    # doesn't sit on top of its own stop marker/name.
+    
     directions = [(math.cos(math.radians(a)), math.sin(math.radians(a)))
                   for a in range(0, 360, 45)]
     distances = [eff_size * f for f in (0.85, 1.05, 1.3, 1.6)]
@@ -2542,17 +2528,13 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
         )
     parts = []
     for record, x, y, base_x, base_y, moved in placements:
-        # Dotted leader line only on the GEOGRAPHIC map. On the octilinear
-        # (schematic) map the icon sits at/near its own stop, so the line
-        # is just clutter there.
         if moved and not schematic:
             parts.append(
                 f'<line x1="{base_x:.3f}" y1="{base_y:.3f}" '
                 f'x2="{x:.3f}" y2="{y:.3f}" '
                 f'stroke="#9ca3af" stroke-width="1" stroke-dasharray="3,3"/>'
             )
-        # Per-landmark scale: e.g. Pashupati/Boudha carry "scale": 0.55 in
-        # the LANDMARKS dict, so they render smaller than the default size.
+        
         landmark_size = eff_size * float(record.get("scale", 1.0) or 1.0)
         geographic_position = None
         if not schematic:
@@ -2572,10 +2554,6 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
 
     closing = svg.lower().rfind("</svg>")
     if closing == -1:
-        # ET may have serialized tags with a namespace prefix (e.g.
-        # "</ns0:svg>") if namespace registration was missed -- fall back
-        # to the last element-closing tag rather than silently dropping
-        # the landmarks.
         closing = svg.lower().rfind("</")
         if closing == -1:
             return svg
@@ -2590,17 +2568,6 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
 
 
 def _separate_landmark_icons(placements, icon_size, segments, max_push):
-    """Push landmark icons apart so no two icons overlap each other.
-
-    Two landmarks whose nearest stops anchor them to the same region
-    (common in schematic mode, where several landmarks can resolve to the
-    same weighted cluster of stop labels) would otherwise be drawn stacked
-    on top of one another. This nudges each icon away from its nearest
-    already-placed neighbour, one pass at a time, while keeping the result
-    clear of the transit lines.
-    """
-
-   
     min_gap = icon_size * 1.7
     moved_any = False
     for i in range(len(placements)):
@@ -2695,14 +2662,7 @@ def _collect_route_line_segments(fig):
 
 
 def _clear_landmark_of_lines(lon, lat, segments, icon_size_deg):
-    """Nudge (x, y) away from the nearest route-line segment so the
-    landmark icon never sits on top of / touches a transit line. Returns
-    (new_x, new_y, moved).
-
-    One push can land the icon on a *different* nearby segment (lines run
-    close together), so iterate until the icon is clear of every segment,
-    bounded so dense/overlapping geometry can't loop forever.
-    """
+    
     radius = (icon_size_deg / 2.0) * 1.15  # icon half-size + a small margin
     x, y = lon, lat
     for _ in range(12):  # bounded passes
@@ -2724,23 +2684,7 @@ def _clear_landmark_of_lines(lon, lat, segments, icon_size_deg):
 
 
 def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.0026):
-    """Add landmark icons in Plotly longitude/latitude data coordinates.
-
-    Each landmark is anchored to its real (lon, lat) by default, so it
-    stays in the correct relative place as the user zooms/pans, and is
-    drawn at a fixed size in data-space (icon_size_deg), so every landmark
-    reads at the same visual size regardless of how spread out the
-    selected routes are.
-
-    Before drawing, each landmark is checked against every route line
-    already on the map; if the icon would touch or overlap a line, it is
-    nudged sideways just far enough to clear it, and a thin dotted leader
-    line is drawn back to the landmark's real position so its true
-    location is still visible.
-
-    Landmark artwork is embedded as a Plotly layout image, using uploaded
-    SVG artwork when available and the built-in SVG artwork otherwise.
-    """
+    
     segments = _collect_route_line_segments(fig)
     edit_meta = []   # per-landmark data the in-browser Edit mode needs
 
@@ -2773,15 +2717,10 @@ def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.002
             continue
 
         true_lon, true_lat = float(record["lon"]), float(record["lat"])
-        # Nudge the icon off any route line it would otherwise touch --
-        # same collision handling the LOOM map uses (_clear_landmark_of_lines
-        # works in plain x/y numbers, so pass lon as x and lat as y).
         icon_lon, icon_lat, moved = _clear_landmark_of_lines(
             true_lon, true_lat, segments, icon_size_deg
         )
-        # Same anti-drift cap as the LOOM map: the icon may shift only a
-        # little over one icon width from its real position, so the dotted
-        # leader line stays short and the icon reads as "near this stop".
+        
         max_shift_deg = icon_size_deg * 1.25
         d_lon = icon_lon - true_lon
         d_lat = icon_lat - true_lat
@@ -2802,8 +2741,7 @@ def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.002
             )
 
         custom_svg = get_landmark_custom_svg(record)
-        # Per-landmark scale (e.g. Pashupati/Boudha = 0.55 in LANDMARKS):
-        # shrinks the icon in data-space so it renders smaller on the map.
+    
         landmark_scale = float(record.get("scale", 1.0) or 1.0)
         eff_icon_deg = icon_size_deg * landmark_scale
         image_index = len(fig.layout.images)
@@ -2826,17 +2764,7 @@ def add_landmarks_to_transit_figure(fig, selected_landmarks, icon_size_deg=0.002
                 layer="above",
             )
         )
-        # Name label: hidden by default, revealed only when the icon is
-        # touched/tapped (mobile) or hovered (desktop) -- a real click-to-
-        # toggle needs custom JS wired into the embedded plot HTML, but an
-        # invisible marker with Plotly's own built-in hover tooltip gets the
-        # same "touch it to see the name, otherwise nothing shows" behavior
-        # for free: on touch devices, tapping a point fires the same hover
-        # event a mouse-over would, and the tooltip disappears again once
-        # you tap/move elsewhere.
-        # Editable copy of this icon for the Edit mode: the same artwork drawn
-        # in a 100x100 box (icon fills 80% of it), so 1/0.8 converts the icon
-        # size into the size of that box.
+       
         try:
             edit_meta.append(dict(
                 name=str(record["name"]),
