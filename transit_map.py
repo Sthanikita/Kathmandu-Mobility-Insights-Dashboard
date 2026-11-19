@@ -615,7 +615,7 @@ RIVER_DATA_FILES = _data_candidates(
      "kathmandu_rivers.json",
 )
 ROAD_DATA_FILES = _data_candidates(
-     "kathmandu_road.geojson",
+     "ktm_pokhara_road.geojson",
 )
 
 
@@ -839,7 +839,7 @@ def road_unavailable_message(error_message=""):
     return (
         "Road data could not be loaded"
         + (f" ({error_message})" if error_message else "")
-        + ". Put `trunk.geojson` in the `data` folder next to the app."
+        + f". Put `{os.path.basename(ROAD_DATA_FILES[0])}` in the `data` folder next to the app."
     )
 
 
@@ -7868,9 +7868,11 @@ with col_map1:
                             "Show roads",
                             value=True,
                             key="tm_show_road",
-                            help="Draws the road network (from "
-                                 "data/trunk.geojson) underneath the "
-                                 "route lines.",
+                            help=(
+                                "Draws the road network (from "
+                                f"data/{os.path.basename(ROAD_DATA_FILES[0])}) "
+                                "underneath the route lines."
+                            ),
                         )
 
                     if tm_show_river:
@@ -7963,7 +7965,8 @@ with col_map1:
                         key="loom_show_road",
                         disabled=schematic,
                         help=(
-                            "Draws the road network (from data/trunk.geojson) "
+                            "Draws the road network (from "
+                            f"data/{os.path.basename(ROAD_DATA_FILES[0])}) "
                             "with road names, like the Plotly transit map. "
                             "Roads are placed by real coordinates, so they are "
                             "only drawn on the geographic layout (turn "

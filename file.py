@@ -352,10 +352,82 @@ div[data-testid="stPlotlyChart"] {
 
 </style>
 """, unsafe_allow_html=True)
+# ================= CITY SETUP =================
+# One Supabase project, one Postgres schema per city (Kathmandu = public,
+# Pokhara = pokhara). Add ONE connection URL to .streamlit/secrets.toml:
+#   DB_URL = "postgresql://postgres.REF:PASSWORD@aws-0-REGION.pooler.supabase.com:5432/postgres"
+# To add a city later: import its GTFS into a new schema and add an entry below.
+CITIES = {
+    "Kathmandu": {
+        "schema": "public",
+        "center": [27.7, 85.3],
+        "zoom": 12,
+        "title": "Transit Map of Kathmandu Valley",
+        "agency_name": "Kathmandu Transit",
+    },
+    "Pokhara": {
+        "schema": "pokhara",
+        "center": [28.2096, 83.9856],
+        "zoom": 13,
+        "title": "Transit Map of Pokhara",
+        "agency_name": "Pokhara Transit",
+    },
+}
+
+# The City selector widget is drawn in the map header (key="city_select").
+# It is read here first, because the data below must load for the right city.
+CITY = st.session_state.get("city_select", "Kathmandu")
+if CITY not in CITIES:
+    CITY = "Kathmandu"
+CITY_CFG = CITIES[CITY]
+TITLE = CITY_CFG["title"]
+
+# When the city changes: clear cached data and old route selections so the
+# previous city's routes/geometry never leak into the new one.
+if st.session_state.get("_active_city") != CITY:
+    st.cache_data.clear()
+    for _k in list(st.session_state.keys()):
+        if _k.startswith("route_") or _k == "selected_route_id":
+            del st.session_state[_k]
+    st.session_state["_active_city"] = CITY
+
+
 # ================= DB =================
+@st.cache_resource
+def _make_engine(url, schema):
+    # The Supabase pooler can ignore the "options" startup parameter, so the
+    # schema is set with a real SQL command on every new connection instead.
+    # search_path makes every unqualified table name (routes, stops, ...)
+    # resolve inside the selected city's schema.
+    engine = sqlalchemy.create_engine(url, pool_pre_ping=True)
+
+    @sqlalchemy.event.listens_for(engine, "connect")
+    def _set_search_path(dbapi_conn, _record):
+        cur = dbapi_conn.cursor()
+        cur.execute(f'SET search_path TO "{schema}"')
+        cur.close()
+        dbapi_conn.commit()
+
+    return engine
+
+
 def get_engine():
-    db_url = st.secrets["DB_URL"]
-    return sqlalchemy.create_engine(db_url)
+    return _make_engine(st.secrets["DB_URL"], CITY_CFG["schema"])
+
+
+# Optional: add  DEBUG_DB = true  to your LOCAL secrets.toml to show a sidebar
+# box that proves which schema the app is really reading. Leave it out online.
+if st.secrets.get("DEBUG_DB", False):
+    with st.sidebar.expander("DB debug", expanded=True):
+        try:
+            st.write("City:", CITY, "| schema:", CITY_CFG["schema"])
+            _dbg = pd.read_sql(
+                "select current_setting('search_path') as search_path, "
+                "(select count(*) from routes) as routes, "
+                "(select count(*) from agency) as agencies", get_engine())
+            st.dataframe(_dbg)
+        except Exception as _e:
+            st.exception(_e)
 
 
 # ================= DATA =================
@@ -494,7 +566,7 @@ def is_major_transit_stop(stop_name):
 # =========================================================
 # VECTOR LANDMARKS
 # =========================================================
-LANDMARKS = {
+_KTM_LANDMARKS = {
     "Pashupati Temple": {"lat":27.710637, "lon": 85.349527, "svg": "new_icon/pashupati.svg", "scale": 0.95, "anchor": "Gaushala", "anchor2": "Pingalsthan Gaushala", "t": 0.5, "side": 1, "offset": 1.2},
         "Dharahara": {"lat": 27.701755, "lon": 85.310071, "svg": "new_icon/Dharahara.svg", "anchor": "Shahid Gate Bus Stop", "side": -1, "offset": 0.85},
         "Boudhanath Stupa": {"lat": 27.722685, "lon":  85.359812, "svg": "new_icon/boudhastupa.svg", "scale": 0.55, "anchor": "Chabahil Bus Station2", "anchor2": "Chabahil Bus Stop1", "t": 0.58, "side": 1, "offset": 0.8},
@@ -513,8 +585,36 @@ LANDMARKS = {
         "Chauni": {"lat": 27.707246, "lon": 85.293175, "svg": "new_icon/chaune.svg","anchor": "Swayambhu Bus Stop1", "anchor2": "Sitapaila Stop", "t": 0.5, "side": 1, "offset": 1.0},
         "Gopi Krishna Hall": {"lat": 27.724308, "lon": 85.351880, "svg": "new_icon/cinema_hall.svg", "scale": 0.55, "anchor": "Sukedhara2", "anchor2": "Gopi Krishna Bus Stop", "t": 0.24, "side": 1, "offset": 1.2},
         "Bhandarkhal": {"lat": 27.708326, "lon": 85.337344, "svg": "new_icon/Bhandarkhal.svg", "scale": 0.95, "anchor": "Gaushala", "anchor2": "Jaya Bageshwori", "t": 0.24, "side": -1, "offset": 1.2},
-        "Kamal Pokhari": {"lat": 27.709880, "lon": 85.329843, "svg": "new_icon/Kamal Pokhari.svg", "scale": 0.55}
+        "Kamal Pokhari": {"lat": 27.709880, "lon": 85.329843, "svg": "new_icon/Kamal Pokhari.svg", "scale": 0.55, "anchor":"Nag Pokhari Bus Stand", "side": 1, "offset": 1.1}
 }
+# Kathmandu landmarks only apply to Kathmandu. Add a _PKR_LANDMARKS dict
+# (Phewa Lake, World Peace Pagoda, ...) and switch it in here for Pokhara.
+_PKR_LANDMARKS = {
+    "Amarsingh  Chaur": {"lat": 28.2060955, "lon": 84.0020183, "svg": "new_icon/pokhara_icon/Marsingh chaur.svg", "scale": 0.8},
+    "Begnas Lake":  {"lat": 28.170695426546455, "lon": 84.09182977791524, "svg": "new_icon/pokhara_icon/Begnas_lake.svg","scale":3.5},
+    "Bhadrakali Temple": {"lat":28.213103, "lon":  84.009107, "svg": "new_icon/pokhara_icon/Bhadrakali Mandhir.svg", "scale": 0.5},
+    "Ban":  {"lat": 28.212046, "lon": 84.020190, "svg": "new_icon/pokhara_icon/ban.svg","scale":1.5},
+    "Bokshi Ban": {"lat":28.209412, "lon":  84.031267, "svg": "new_icon/pokhara_icon/Bokshi Ban.svg", "scale": 3.5},
+    "Annapurna Cable Car": {"lat":28.213103, "lon":  84.009107, "svg": "new_icon/pokhara_icon/cABLE CAR.svg", "scale": 0.5},
+    "Fewa Lake": {"lat": 28.218896,  "lon":83.955921, "svg": "new_icon/pokhara_icon/Fewa_lake.svg", "scale": 3.5},
+    "Cinema Hall": {"lat": 28.259924, "lon": 83.968754, "svg": "new_icon/pokhara_icon/cinema_hall.svg", "scale": 0.6},
+    "Manipal Teaching Hospital": {"lat": 28.236398, "lon": 84.001287, "svg": "new_icon/pokhara_icon/Bir Hospital.svg", "scale": 0.8},
+    "Mahendra Cave ": {"lat": 28.271040, "lon":  83.983328, "svg": "new_icon/pokhara_icon/Mahendra_gufa.svg", "scale": 0.8}, 
+    "Bhadrakali Machhapokhari": {"lat": 28.212543, "lon": 84.008892, "svg": "new_icon/pokhara_icon/Bhadrakali Macchhapokhari.svg", "scale": 0.4},
+    "Pokhara Airport": {"lat": 28.198695, "lon": 83.981053, "svg": "new_icon/pokhara_icon/pokhara airport.svg", "scale": 1.5},
+    "Pokhara International Airport": {"lat": 28.186903, "lon": 84.010495, "svg": "new_icon/pokhara_icon/Pokhara Internartional Airport.svg", "scale": 3.5},
+    "Pokhara Rangasala": {"lat": 28.204195, "lon":  83.992230, "svg": "new_icon/pokhara_icon/pokhara rangasala.svg", "scale": 0.8},
+    "Raniban": {"lat": 28.213970, "lon": 83.956100, "svg": "new_icon/pokhara_icon/community_forest.svg", "scale": 2.5},
+    "Rastriya Bank": {"lat": 28.201591, "lon": 83.970260, "svg": "new_icon/pokhara_icon/bank.svg", "scale": 0.8},
+    "Rato Dhanda": {"lat": 28.224456,  "lon": 83.960747, "svg": "new_icon/pokhara_icon/RATO DHANDA.svg", "scale": 1.5},
+    "WRC College": {"lat": 28.258075, "lon": 83.974254, "svg": "new_icon/pokhara_icon/wrc.svg", "scale": 0.6},
+}
+LANDMARKS_BY_CITY = {
+    "Kathmandu": _KTM_LANDMARKS,
+    "Pokhara": _PKR_LANDMARKS, 
+}
+
+LANDMARKS = LANDMARKS_BY_CITY.get(CITY, {})
 DEFAULT_LANDMARKS = tuple(LANDMARKS.keys())
 
 # Rani Pokhari shoreline from OpenStreetMap way 21565774. Keep the real
@@ -558,10 +658,9 @@ def get_landmark_records(selected_landmarks):
 # MAP DATA LAYERS: RIVERS + ROADS (your own GeoJSON files)
 # =========================================================
 
-RIVER_COLOR = "#a8d4f2"
+RIVER_COLOR = "#d3edfc"
 RIVER_LABEL_COLOR = "#2f6fa3"
 RIVER_BBOX = (27.55, 85.15, 27.85, 85.60)  # south, west, north, east
-RIVER_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 # -------------------------------------------------------------------
 # CARTOGRAPHIC ROAD STYLE FOR THE TRANSIT MAP
@@ -572,35 +671,33 @@ ROAD_SURFACE_COLOR = "#f4f4f4"   # light surface so the road edges read clearly
 
 ROAD_CASING_COLORS = {
     "primary":   "#d1cdcd",   # primary: neutral grey outline
-    "secondary": "#eecb58",   # trunk:   golden outline
+    "trunk": "#eecb58",   # trunk:   golden outline
 }
 ROAD_SURFACE_COLORS = {
     "primary":   "#f4f4f4",   # primary: light grey/white fill
-    "secondary": "#fefae8",   # trunk:   pale yellow fill
+    "trunk": "#fefae8",   # trunk:   pale yellow fill
 }
 
-# Screen-pixel widths. Much thinner than before so neighbouring roads no
-# longer fuse into one grey mass.
+
 ROAD_CASING_WIDTH = {
     "primary": 10.0,     # primary roads
-    "secondary": 16.0,  # trunk roads (wider than primary)
-    "tertiary": 5.5,
-    "other": 4.0,
+    "trunk": 16.0,  # trunk roads (wider than primary)
+
 }
 ROAD_SURFACE_WIDTH = {
     "primary": 8.0,     # primary roads
-    "secondary": 12.0,   # trunk roads (wider than primary)
-    "tertiary": 3.5,
-    "other": 2.5,
+    "trunk": 12.0,   # trunk roads (wider than primary)
+
 }
 
-ROAD_DRAW_ORDER = {"other": 0, "tertiary": 1, "primary": 2, "secondary": 3}
+ROAD_DRAW_ORDER = {"trunk": 0, "primary": 1}
 ROAD_COLOR = ROAD_SURFACE_COLOR
 ROAD_HIERARCHY_WIDTH = ROAD_SURFACE_WIDTH
-ROAD_BBOX = (27.55, 85.15, 27.85, 85.60)  # south, west, north, east
+ROAD_BBOX = (
+    (28.0, 83.8, 28.4, 84.2) if CITY == "Pokhara"
+    else (27.55, 85.15, 27.85, 85.60)
+)  # south, west, north, east
 
-RIVER_ALLOW_OSM_FALLBACK = False   # True = download from OSM when no local file
-ROAD_ALLOW_OSM_FALLBACK = False
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -617,13 +714,14 @@ def _data_candidates(*names):
 
 
 RIVER_DATA_FILES = _data_candidates(
-    "kathmandu_rivers.geojson",
-     "kathmandu_rivers.json",
+    f"{CITY.lower()}_rivers.geojson",
+    f"{CITY.lower()}_rivers.json",
 )
 ROAD_DATA_FILES = _data_candidates(
-     "kathmandu_road.geojson", "kathmandu_road.gpkg",
+    "pokhara_ktm_road.geojson" if CITY == "Pokhara"
+    else f"{CITY.lower()}_road.geojson",
+    f"{CITY.lower()}_road.geojson",
 )
-RIVER_CACHE_FILE = os.path.join(_SCRIPT_DIR, "data", "kathmandu_rivers_osm_cache.json")
 
 
 def _file_signature(paths):
@@ -728,11 +826,10 @@ def _read_json_file(path):
 def _road_hierarchy(road_class, road_name=""):
     """Map a road class tag onto a coarse bucket (picks the line width only)."""
     text = f"{road_class} {road_name}".lower()
-    # Trunk roads get their own (wider) width bucket. It reuses the
-    # "secondary" slot because this dataset only has trunk + primary roads.
+    # Keep trunk roads distinct so they use their wider dedicated style.
     if "trunk" in str(road_class or "").lower():
-        return "secondary"
-    if any(k in text for k in ("primary", "trunk", "motorway", "frn", "f0", "f1", "highway")):
+        return "trunk"
+    if any(k in text for k in ("primary", "trunk", "frn", "f0", "f1", "highway")):
         return "primary"
     if "secondary" in text or "rrn" in text:
         return "secondary"
@@ -780,37 +877,6 @@ def _parse_road_data(obj):
             if len(run) >= 2:
                 roads.append((label, hierarchy, tuple(run)))
     return tuple(roads)
-
-
-def _fetch_roads_from_overpass():
-    """Optional fallback: named roads in the valley from OpenStreetMap."""
-    import urllib.parse
-    import urllib.request
-
-    s, w, n, e = ROAD_BBOX
-    query = (
-        "[out:json][timeout:120];"
-        f'way["highway"~"^(primary|secondary|tertiary|trunk|residential)$"]["name"]({s},{w},{n},{e});'
-        "out geom;"
-    )
-    request = urllib.request.Request(
-        RIVER_OVERPASS_URL,
-        data=urllib.parse.urlencode({"data": query}).encode("utf-8"),
-        headers={"User-Agent": "kathmandu-transit-map/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-
-    features = []
-    for el in payload.get("elements", []):
-        tags = el.get("tags") or {}
-        coords = [[g["lon"], g["lat"]] for g in (el.get("geometry") or [])]
-        features.append({
-            "properties": {"name": tags.get("name:en") or tags.get("name"),
-                           "road_class": tags.get("highway")},
-            "geometry": {"type": "LineString", "coordinates": coords},
-        })
-    return {"type": "FeatureCollection", "features": features}
 
 
 def _read_road_gpkg(path):
@@ -861,14 +927,9 @@ def _cached_road_paths(signature):
             )
         return roads
 
-    if not ROAD_ALLOW_OSM_FALLBACK:
-        raise FileNotFoundError(
-            "no local road file found. Looked for: " + ", ".join(ROAD_DATA_FILES)
-        )
-    roads = _parse_road_data(_fetch_roads_from_overpass())
-    if not roads:
-        raise RuntimeError("no roads returned for the Kathmandu Valley area")
-    return roads
+    raise FileNotFoundError(
+        "no local road file found. Looked for: " + ", ".join(ROAD_DATA_FILES)
+    )
 
 
 def load_road_paths():
@@ -883,7 +944,7 @@ def road_unavailable_message(error_message=""):
     return (
         "Road data could not be loaded"
         + (f" ({error_message})" if error_message else "")
-        + ". Put `trunk.geojson` in the `data` folder next to the app."
+        + f". Put `{os.path.basename(ROAD_DATA_FILES[0])}` in the `data` folder next to the app."
     )
 
 
@@ -989,36 +1050,6 @@ def _parse_river_data(obj):
     return rivers
 
 
-def _fetch_rivers_from_overpass():
-    import urllib.parse
-    import urllib.request
-
-    s, w, n, e = RIVER_BBOX
-    query = (
-        "[out:json][timeout:60];"
-        f'way["waterway"~"^(river|stream)$"]["name"]({s},{w},{n},{e});'
-        "out geom;"
-    )
-    request = urllib.request.Request(
-        RIVER_OVERPASS_URL,
-        data=urllib.parse.urlencode({"data": query}).encode("utf-8"),
-        headers={"User-Agent": "kathmandu-transit-map/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=90) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-
-    rivers = []
-    for el in payload.get("elements", []):
-        tags = el.get("tags") or {}
-        coords = [[g["lon"], g["lat"]] for g in (el.get("geometry") or [])]
-        rivers.append({
-            "name": tags.get("name:en") or tags.get("name"),
-            "kind": tags.get("waterway"),
-            "coords": coords,
-        })
-    return rivers
-
-
 @st.cache_data(show_spinner="Loading rivers...")
 def _cached_river_paths(signature):
     # `signature` = ((path, mtime), ...) so editing the file busts the cache.
@@ -1032,21 +1063,9 @@ def _cached_river_paths(signature):
             )
         return tuple(rivers)
 
-    if not RIVER_ALLOW_OSM_FALLBACK:
-        raise FileNotFoundError(
-            "no local river file found. Looked for: " + ", ".join(RIVER_DATA_FILES)
-        )
-    raw = _fetch_rivers_from_overpass()
-    rivers = _parse_river_data(raw)
-    if not rivers:
-        raise RuntimeError("no named rivers returned for the Kathmandu Valley area")
-    try:
-        os.makedirs(os.path.dirname(RIVER_CACHE_FILE), exist_ok=True)
-        with open(RIVER_CACHE_FILE, "w", encoding="utf-8") as fh:
-            json.dump(raw, fh)
-    except OSError:
-        pass  # cache file is a convenience only
-    return tuple(rivers)
+    raise FileNotFoundError(
+        "no local river file found. Looked for: " + ", ".join(RIVER_DATA_FILES)
+    )
 
 
 def load_river_paths():
@@ -1061,13 +1080,18 @@ def river_unavailable_message(error_message=""):
     return (
         "River data could not be loaded"
         + (f" ({error_message})" if error_message else "")
-        + ". Put `kathmandu_river.geojson` in the `data` folder next to the app."
+        + ". Put `pokhara_ktm_river.geojson` in the `data` folder next to the app."
     )
-
 
 # ---------------------------------------------------------
 # Transit Map (Plotly): rivers in lon/lat data coordinates
 # ---------------------------------------------------------
+def _plotly_trace_uid(namespace, identity):
+    """Build a stable, CSS-selector-safe UID for Plotly traces."""
+    identity_hash = hashlib.sha256(str(identity).encode("utf-8")).hexdigest()
+    return f"{namespace}-{identity_hash}"
+
+
 def add_rivers_to_transit_figure(fig, lon_range, lat_range):
     """Draw rivers UNDER the route lines. Only the part of each river
     inside the visible lon/lat window is sent to the browser."""
@@ -1108,7 +1132,7 @@ def add_rivers_to_transit_figure(fig, lon_range, lat_range):
             hoverinfo="text",
             hovertext=name,
             showlegend=False,
-            uid=f"river-{kind}-{name}",
+            uid=_plotly_trace_uid("river", f"{kind}-{name}"),
         ))
     added = len(fig.data) - n_before
     if added:
@@ -1190,7 +1214,7 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
     for (name, hierarchy), pts in sorted(
             grouped.items(),
             key=lambda kv: ROAD_DRAW_ORDER.get(kv[0][1], 0)):
-        base = ROAD_CASING_WIDTH.get(hierarchy, ROAD_CASING_WIDTH["other"])
+        base = ROAD_CASING_WIDTH.get(hierarchy, ROAD_CASING_WIDTH["primary"])
         width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
         fig.add_trace(go.Scatter(
             x=[p[0] for p in pts],
@@ -1204,7 +1228,7 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
             hoverinfo="text",
             hovertext=name,
             showlegend=False,
-            uid=f"road-casing-{hierarchy}-{name}",
+            uid=_plotly_trace_uid("road-casing", f"{hierarchy}-{name}"),
         ))
 
     # ------------------------------------------------------------
@@ -1213,7 +1237,7 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
     for (name, hierarchy), pts in sorted(
             grouped.items(),
             key=lambda kv: ROAD_DRAW_ORDER.get(kv[0][1], 0)):
-        base = ROAD_SURFACE_WIDTH.get(hierarchy, ROAD_SURFACE_WIDTH["other"])
+        base = ROAD_SURFACE_WIDTH.get(hierarchy, ROAD_SURFACE_WIDTH["primary"])
         width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
         fig.add_trace(go.Scatter(
             x=[p[0] for p in pts],
@@ -1227,7 +1251,7 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
             hoverinfo="text",
             hovertext=name,
             showlegend=False,
-            uid=f"road-surface-{hierarchy}-{name}",
+            uid=_plotly_trace_uid("road-surface", f"{hierarchy}-{name}"),
         ))
 
     # ------------------------------------------------------------
@@ -1263,12 +1287,25 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
                 math.hypot(b[0] - a[0], b[1] - a[1])
                 for a, b in zip(r, r[1:])
             )
-            if key not in best_by_name or length > best_by_name[key][0]:
+            is_trunk = hierarchy == "trunk"
+            current = best_by_name.get(key)
+            if (
+                current is None
+                or (is_trunk and current[4] != "trunk")
+                or (is_trunk == (current[4] == "trunk")
+                    and length > current[0])
+            ):
                 mid = r[len(r) // 2]
-                best_by_name[key] = (length, mid[0], mid[1], str(name))
+                best_by_name[key] = (
+                    length, mid[0], mid[1], str(name), hierarchy
+                )
 
     level_traces = {}
-    for key, (length, x, y, label) in best_by_name.items():
+    trunk_labels = []
+    for key, (length, x, y, label, hierarchy) in best_by_name.items():
+        if hierarchy == "trunk":
+            trunk_labels.append((x, y, label.lower()))
+            continue
         if length >= 0.20 * base_span:
             level = 0
         elif length >= 0.06 * base_span:
@@ -1292,6 +1329,19 @@ def add_roads_to_transit_figure(fig, lon_range, lat_range):
             showlegend=False,
             uid=f"road-labels-l{level}",
             visible=(level == 0),
+        ))
+
+    if trunk_labels:
+        fig.add_trace(go.Scatter(
+            x=[p[0] for p in trunk_labels],
+            y=[p[1] for p in trunk_labels],
+            mode="text",
+            text=[p[2] for p in trunk_labels],
+            textfont=dict(size=8, color="#6b7280", family="Arial, sans-serif"),
+            textposition="middle center",
+            hoverinfo="skip",
+            showlegend=False,
+            uid="trunk-road-labels",
         ))
 
     if level_traces:
@@ -1504,7 +1554,7 @@ def build_road_svg_markup(svg, route_stops, roads, line_width=40):
             roads, key=lambda r: ROAD_DRAW_ORDER.get(r[1], 0)):
         escaped = _escape_title(name)
         xy = [to_xy(lon, lat) for lon, lat in pts]
-        base = casing_width.get(hierarchy, casing_width["other"])
+        base = casing_width.get(hierarchy, casing_width["primary"])
         width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
         for run in _clip_polyline_to_box(xy, box):
             body.append(
@@ -1519,7 +1569,7 @@ def build_road_svg_markup(svg, route_stops, roads, line_width=40):
             roads, key=lambda r: ROAD_DRAW_ORDER.get(r[1], 0)):
         escaped = _escape_title(name)
         xy = [to_xy(lon, lat) for lon, lat in pts]
-        base = surface_width.get(hierarchy, surface_width["other"])
+        base = surface_width.get(hierarchy, surface_width["primary"])
         width = base * _corridor_width_multiplier(count_by_name.get(name, 0))
         for run in _clip_polyline_to_box(xy, box):
             body.append(
@@ -1580,10 +1630,13 @@ def build_river_svg_markup(svg, route_stops, rivers, line_width=40):
         xy = [to_xy(lon, lat) for lon, lat in pts]
         for run in _clip_polyline_to_box(xy, box):
             width = river_w if kind == "river" else stream_w
+            _rv_title = (
+                f'<title>{html.escape(str(name))}</title>' if name else ''
+            )
             body.append(
                 f'<path d="{_svg_path_d(run)}" fill="none" stroke="{RIVER_COLOR}" '
                 f'stroke-width="{width:.1f}" stroke-linecap="round" '
-                f'stroke-linejoin="round"/>'
+                f'stroke-linejoin="round">{_rv_title}</path>'
             )
             if kind == "river":
                 length = sum(
@@ -1598,7 +1651,7 @@ def build_river_svg_markup(svg, route_stops, rivers, line_width=40):
     # clutter on the map and the user asked for them to be dropped.
 
     return (
-        '\n<!-- River layer -->\n<g class="loom-river" pointer-events="none">'
+        '\n<!-- River layer -->\n<g class="loom-river" pointer-events="visiblePainted">'
         + "".join(body)
         + '</g>\n<!-- End river layer -->\n'
     )
@@ -1737,11 +1790,19 @@ def uploaded_svg_viewbox(svg_text):
     return None
 
 
-def _svg_landmark_group(record, x, y, size=28):
+def _svg_landmark_group(record, x, y, size=28, geographic_position=None):
     name = html.escape(str(record["name"]))
     s = float(size)
     hx = s * 0.5
     hy = s * 0.5
+    geo_attrs = ""
+    if geographic_position:
+        geo_attrs = (
+            f' data-lat="{geographic_position["lat"]:.8f}"'
+            f' data-lon="{geographic_position["lon"]:.8f}"'
+            f' data-lat-per-unit="{geographic_position["lat_per_unit"]:.12g}"'
+            f' data-lon-per-unit="{geographic_position["lon_per_unit"]:.12g}"'
+        )
 
     custom_svg = get_landmark_custom_svg(record)
     if custom_svg:
@@ -1782,7 +1843,8 @@ def _svg_landmark_group(record, x, y, size=28):
 
     return f"""
       <g class="loom-landmark" data-landmark="{name}" data-landmark-name="{name}"
-         data-x="{x:.3f}" data-y="{y:.3f}" data-size="{s:.3f}" tabindex="0" style="cursor:pointer">
+         data-x="{x:.3f}" data-y="{y:.3f}" data-size="{s:.3f}"{geo_attrs}
+         tabindex="0" style="cursor:pointer">
         {shapes}
         <text class="landmark-label" x="{x+hx*0.95:.3f}" y="{y-hy*0.95:.3f}"
               visibility="hidden"
@@ -2492,7 +2554,17 @@ def add_landmarks_to_loom_svg(svg, selected_routes, selected_landmarks,
         # Per-landmark scale: e.g. Pashupati/Boudha carry "scale": 0.55 in
         # the LANDMARKS dict, so they render smaller than the default size.
         landmark_size = eff_size * float(record.get("scale", 1.0) or 1.0)
-        parts.append(_svg_landmark_group(record, x, y, landmark_size))
+        geographic_position = None
+        if not schematic:
+            geographic_position = {
+                "lon": lon_min + ((x - vx) / vw) * lon_span,
+                "lat": lat_max - ((y - vy) / vh) * lat_span,
+                "lon_per_unit": lon_span / vw,
+                "lat_per_unit": -lat_span / vh,
+            }
+        parts.append(_svg_landmark_group(
+            record, x, y, landmark_size, geographic_position
+        ))
 
     markup = "\n<!-- Geographic vector landmarks -->\n"
     markup += "".join(parts)
@@ -2822,6 +2894,27 @@ ORDER BY trips_starting_at_stop DESC
 LIMIT 5;
     """, engine)
 
+def _clean_shape_points(df):
+    """Make shape points safe for LOOM/GTFS: per shape, order by
+    shape_pt_sequence (ties keep DB order), drop consecutive duplicate
+    points, then renumber 1..n so the sequence is strictly increasing."""
+    df = df.copy()
+    df["shape_pt_sequence"] = pd.to_numeric(df["shape_pt_sequence"], errors="coerce")
+    df = df.dropna(subset=["shape_pt_lat", "shape_pt_lon"]).reset_index(drop=True)
+    df["_order"] = range(len(df))
+    df = df.sort_values(
+        ["shape_id", "shape_pt_sequence", "_order"], na_position="last"
+    )
+    grp = df.groupby("shape_id", sort=False)
+    same_as_prev = (
+        (grp["shape_pt_lat"].shift() == df["shape_pt_lat"])
+        & (grp["shape_pt_lon"].shift() == df["shape_pt_lon"])
+    )
+    df = df[~same_as_prev].copy()
+    df["shape_pt_sequence"] = df.groupby("shape_id", sort=False).cumcount() + 1
+    return df.drop(columns="_order").reset_index(drop=True)
+
+
 @st.cache_data
 def route_geom(route_id):
     engine = get_engine()
@@ -2839,10 +2932,8 @@ def route_geom(route_id):
     if df.empty:
         return pd.DataFrame(columns=["shape_id", "path"])
 
-    # Ensure shape_pt_sequence is sorted numerically
-    df["shape_pt_sequence"] = pd.to_numeric(df["shape_pt_sequence"], errors="coerce")
-    df = df.dropna(subset=["shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"])
-    df = df.sort_values(["shape_id", "shape_pt_sequence"])
+    # Order points, drop duplicate points and renumber the sequence
+    df = _clean_shape_points(df)
 
     records = []
     for shape_id, group in df.groupby("shape_id"):
@@ -2925,7 +3016,7 @@ def _offset_polyline(lons, lats, offset_deg):
 
 def build_transit_map(selected_routes, route_color_map, route_name_map,
                       route_agency_map=None,
-                      title_text="Transit Map of Kathmandu Valley",
+                      title_text=TITLE,
                       separate_overlapping_routes=True,
                       route_spacing=1.0,
                       label_density="Every other stop",
@@ -3241,7 +3332,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                 legendgroup=agency_group,
                 showlegend=True,
                 hoverinfo="skip",
-                uid=f"agency-{route_id}",
+                uid=_plotly_trace_uid("agency", route_id),
             ))
 
         legend_name = html.escape(str(route_label))
@@ -3269,7 +3360,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             name=legend_name,
             hoverinfo="skip",
             legendgroup=agency_group,
-            uid=f"line-{route_id}",
+            uid=_plotly_trace_uid("line", route_id),
             cliponaxis=False,
         ))
 
@@ -3302,7 +3393,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
             showlegend=False,
             legendgroup=agency_group,
             cliponaxis=False,
-            uid=f"stops-{route_id}",
+            uid=_plotly_trace_uid("stops", route_id),
         ))
 
     # ------------------------------------------------------------
@@ -3391,7 +3482,7 @@ def build_transit_map(selected_routes, route_color_map, route_name_map,
                 showlegend=False,
                 legendgroup=shared_legendgroup,
                 cliponaxis=False,
-                uid=f"shared-center-{name_key}",
+                uid=_plotly_trace_uid("shared-center", name_key),
             ))
 
         if label_density != "Major exchanges only" or is_major_transit_stop(label_name):
@@ -3998,21 +4089,14 @@ def create_filtered_gtfs(selected_routes_tuple):
             )
 
     if not shapes_df.empty:
-        for column in ("shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"):
+        for column in ("shape_pt_lat", "shape_pt_lon"):
             if column in shapes_df:
                 shapes_df[column] = pd.to_numeric(
                     shapes_df[column], errors="coerce"
                 )
-        if "shape_pt_sequence" in shapes_df:
-            shapes_df["shape_pt_sequence"] = (
-                shapes_df["shape_pt_sequence"].fillna(0).astype(int)
-            )
-        coordinate_columns = [
-            column for column in ("shape_pt_lat", "shape_pt_lon")
-            if column in shapes_df
-        ]
-        if coordinate_columns:
-            shapes_df = shapes_df.dropna(subset=coordinate_columns)
+        # Order points, drop duplicate points, renumber sequence 1..n per
+        # shape (LOOM rejects repeated/non-increasing shape_pt_sequence)
+        shapes_df = _clean_shape_points(shapes_df)
         tables["shapes"] = shapes_df
 
     if "agency_id" in routes_df:
@@ -4025,7 +4109,7 @@ def create_filtered_gtfs(selected_routes_tuple):
             raise ValueError("No agency records found for selected routes.")
 
         required_agency_defaults = {
-            "agency_name": "Kathmandu Transit",
+            "agency_name": CITY_CFG["agency_name"],
             "agency_url": "https://example.com/",
             "agency_timezone": "Asia/Kathmandu",
         }
@@ -5145,7 +5229,7 @@ def generate_loom_svg(
 
 
 def add_route_title_to_svg(
-    svg, selected_routes, route_name_map, title_text="Transit Map of Kathmandu Valley"
+    svg, selected_routes, route_name_map, title_text=TITLE
 ):
     return svg
 
@@ -5406,7 +5490,7 @@ def flatten_textpath_labels(svg):
 def build_composite_svg(
     svg, selected_routes, route_name_map, route_color_hex_map,
     route_agency_map=None,
-    title_text="Transit Map of Kathmandu Valley"
+    title_text=TITLE
 ):
 
     w_match = re.search(r'width="([\d.]+)', svg)
@@ -5644,7 +5728,7 @@ EDIT_PANEL_JS = r'''function createEditPanel(afterEl, h) {
   afterEl.insertAdjacentElement('afterend', p);
   function q(c) { return p.querySelector(c); }
   var scale = q('.ed-scale'), scaleV = q('.ed-scale-v'), rot = q('.ed-rot'), rotN = q('.ed-rot-n'), msg = q('.ed-msg');
-  var HINT = 'Click a label or icon, then drag it. Arrow keys nudge, + / - resize, [ ] rotate.';
+  var HINT = 'Select an icon to see/copy lat/lon; drag it to move. Arrow keys nudge, + / - resize, [ ] rotate.';
   function enable(on) {
     [scale, rot, rotN, q('.ed-b-item')].forEach(function (e) { e.disabled = !on; });
   }
@@ -5730,6 +5814,18 @@ LOOM_EDIT_JS = r'''(function () {
 
   function isChanged(it) { var s = it.st; return !!(s.dx || s.dy || s.rot || s.scale !== 1); }
 
+  function showCoords(it) {
+    if (!it || it.kind !== 'landmark') { panel.setCoords(null); return; }
+    var lat = parseFloat(it.el.getAttribute('data-lat'));
+    var lon = parseFloat(it.el.getAttribute('data-lon'));
+    var latPerUnit = parseFloat(it.el.getAttribute('data-lat-per-unit'));
+    var lonPerUnit = parseFloat(it.el.getAttribute('data-lon-per-unit'));
+    if (![lat, lon, latPerUnit, lonPerUnit].every(Number.isFinite)) {
+      panel.setCoords(null); return;
+    }
+    panel.setCoords(lat + it.st.dy * latPerUnit, lon + it.st.dx * lonPerUnit);
+  }
+
   function ensureWrap(it) {
     if (it.wrap || !it.el.parentNode) return;
     var w = document.createElementNS(NS, 'g');
@@ -5780,7 +5876,7 @@ LOOM_EDIT_JS = r'''(function () {
   }
   function select(it) {
     clearSel(); sel = it || null;
-    if (!sel) { panel.set(null); return; }
+    if (!sel) { panel.set(null); panel.setCoords(null); return; }
     ensureWrap(sel);
     var r = document.createElementNS(NS, 'rect');
     r.setAttribute('x', sel.cx - sel.bw / 2); r.setAttribute('y', sel.cy - sel.bh / 2);
@@ -5790,15 +5886,16 @@ LOOM_EDIT_JS = r'''(function () {
     r.setAttribute('class', 'ed-sel-rect'); r.setAttribute('vector-effect', 'non-scaling-stroke'); r.setAttribute('pointer-events', 'none');
     sel.wrap.appendChild(r); sel.rect = r;
     panel.set(sel.name, sel.st.scale, sel.st.rot);
+    showCoords(sel);
   }
 
   var panel = createEditPanel(toolbar, {
     onScale: function (v) { if (sel) { sel.st.scale = v; apply(sel); save(); } },
     onRot: function (v) { if (sel) { sel.st.rot = v; apply(sel); save(); } },
-    onResetItem: function () { if (sel) { sel.st = {dx: 0, dy: 0, rot: 0, scale: 1}; apply(sel); panel.set(sel.name, 1, 0); save(); } },
+    onResetItem: function () { if (sel) { sel.st = {dx: 0, dy: 0, rot: 0, scale: 1}; apply(sel); panel.set(sel.name, 1, 0); showCoords(sel); save(); } },
     onResetAll: function () {
       items.forEach(function (it) { it.st = {dx: 0, dy: 0, rot: 0, scale: 1}; apply(it); });
-      if (sel) panel.set(sel.name, 1, 0);
+      if (sel) { panel.set(sel.name, 1, 0); showCoords(sel); }
       save();
     },
     onDone: function () { window.loomEditToggle(); }
@@ -5833,6 +5930,7 @@ LOOM_EDIT_JS = r'''(function () {
     drag.it.st.dx = drag.dx0 + (p.x - drag.px);
     drag.it.st.dy = drag.dy0 + (p.y - drag.py);
     apply(drag.it);
+    showCoords(drag.it);
   }, true);
   function endDrag(e) {
     if (!drag) return;
@@ -5857,7 +5955,7 @@ LOOM_EDIT_JS = r'''(function () {
     else if (k === 'Escape') { select(null); return; }
     else used = false;
     if (!used) return;
-    e.preventDefault(); apply(sel); panel.set(sel.name, sel.st.scale, sel.st.rot); save();
+    e.preventDefault(); apply(sel); panel.set(sel.name, sel.st.scale, sel.st.rot); showCoords(sel); save();
   });
 
   window.loomEditToggle = function () {
@@ -6240,6 +6338,682 @@ TRANSIT_EDIT_JS = r'''(function () {
 '''
 
 
+# =========================================================
+# PRINT / EXPORT DIALOG (SVG / PNG / PDF, A3 / A2)
+# Shared dialog + one adapter each for the LOOM map (geographic and
+# octilinear) and the Plotly Transit Map. Plain strings (not f-strings).
+# =========================================================
+PRINT_KIT_JS = r'''window.PrintKit = (function () {
+  var PAPERS = {
+    A3: {w: 420, h: 297, margin: 10, stopPt: 9},
+    A2: {w: 594, h: 420, margin: 14, stopPt: 12}
+  };
+  var DPI = 200;
+  var PT_MM = 25.4 / 72;
+  var saved = {fmt: 'pdf', paper: 'A3'};
+
+  function page(key, aspect) {
+    var p = PAPERS[key], land = aspect >= 1;
+    var W = land ? p.w : p.h, H = land ? p.h : p.w;
+    return {key: key, W: W, H: H, m: p.margin, cw: W - 2 * p.margin, ch: H - 2 * p.margin,
+            landscape: land, stopPt: p.stopPt};
+  }
+  function fit(pg, w, h) {
+    var s = Math.min(pg.cw / w, pg.ch / h);
+    return {s: s, w: w * s, h: h * s, x: pg.m + (pg.cw - w * s) / 2, y: pg.m + (pg.ch - h * s) / 2};
+  }
+  function median(a) {
+    if (!a.length) return 0;
+    a = a.slice().sort(function (x, y) { return x - y; });
+    var m = a.length >> 1;
+    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+  }
+  // medianUnits: current stop-label size in map units; mmPerUnit: how many
+  // millimetres one map unit becomes on the chosen sheet; targetPt: wanted size.
+  function labelFactor(medianUnits, mmPerUnit, targetPt) {
+    var curPt = medianUnits * mmPerUnit / PT_MM;
+    if (!(curPt > 0) || !(targetPt > 0)) return {k: 1, curPt: curPt || 0};
+    return {k: Math.max(0.3, Math.min(3, targetPt / curPt)), curPt: curPt};
+  }
+  function pageSvg(pg, inner) {
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ' +
+      'width="' + pg.W + 'mm" height="' + pg.H + 'mm" viewBox="0 0 ' + pg.W + ' ' + pg.H + '">' +
+      '<rect x="0" y="0" width="' + pg.W + '" height="' + pg.H + '" fill="#ffffff"/>' +
+      inner + '</svg>';
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function download(blob, name) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+  }
+  function loadScript(src) {
+    return new Promise(function (res, rej) {
+      var s = document.createElement('script');
+      s.src = src; s.onload = res;
+      s.onerror = function () { rej(new Error('Could not load the PDF library (check your internet connection).')); };
+      document.head.appendChild(s);
+    });
+  }
+  function svgToCanvas(svgText, pxW, pxH) {
+    return new Promise(function (resolve, reject) {
+      var txt = svgText.replace(/width="[\d.]+mm"\s+height="[\d.]+mm"/, 'width="' + pxW + '" height="' + pxH + '"');
+      var url = URL.createObjectURL(new Blob([txt], {type: 'image/svg+xml;charset=utf-8'}));
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var c = document.createElement('canvas');
+          c.width = pxW; c.height = pxH;
+          var x = c.getContext('2d');
+          x.fillStyle = '#ffffff'; x.fillRect(0, 0, pxW, pxH);
+          x.drawImage(img, 0, 0, pxW, pxH);
+          URL.revokeObjectURL(url);
+          resolve(c);
+        } catch (e) { URL.revokeObjectURL(url); reject(e); }
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('Could not rasterize the map at this size.')); };
+      img.src = url;
+    });
+  }
+  async function pdfBlob(canvas, pg) {
+    if (!(window.jspdf && window.jspdf.jsPDF)) {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+    }
+    var doc = new window.jspdf.jsPDF({orientation: pg.landscape ? 'landscape' : 'portrait',
+                                     unit: 'mm', format: [pg.W, pg.H], compress: true});
+    doc.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, pg.W, pg.H);
+    return doc.output('blob');
+  }
+
+  function close() {
+    var o = document.getElementById('pk-overlay');
+    if (o) { if (o._pkUrl) URL.revokeObjectURL(o._pkUrl); o.remove(); }
+  }
+
+  // cfg: {wrapper, basename, info(paper) -> {pg}, render(paper, fmt, pt) -> {svg, pg}}
+  function open(cfg) {
+    close();
+    var st = {fmt: saved.fmt, paper: saved.paper, pt: null, busy: false, seq: 0, pseq: 0, cache: null, url: null, timer: 0};
+    var ov = document.createElement('div');
+    ov.id = 'pk-overlay';
+    ov.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;z-index:100000;' +
+      'background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;' +
+      'font-family:Arial,sans-serif;';
+    var bBase = 'padding:6px 0;cursor:pointer;border-radius:6px;border:1px solid #ccc;background:#fff;' +
+                'color:#222;font-size:13px;flex:1;';
+    ov.innerHTML =
+      '<div style="background:#fff;border-radius:10px;width:min(720px,94%);max-height:94%;overflow:auto;padding:18px 20px;' +
+      'box-shadow:0 10px 40px rgba(0,0,0,.35);color:#111;box-sizing:border-box;">' +
+      '<div style="font-size:16px;font-weight:700;margin-bottom:14px;">🖨 Print / Export map</div>' +
+      '<div style="font-size:12px;font-weight:700;color:#555;margin-bottom:5px;">FORMAT</div>' +
+      '<div id="pk-fmt" style="display:flex;gap:6px;margin-bottom:12px;">' +
+        '<button data-v="svg" style="' + bBase + '">SVG</button>' +
+        '<button data-v="png" style="' + bBase + '">PNG</button>' +
+        '<button data-v="pdf" style="' + bBase + '">PDF</button></div>' +
+      '<div style="font-size:12px;font-weight:700;color:#555;margin-bottom:5px;">PAPER SIZE</div>' +
+      '<div id="pk-paper" style="display:flex;gap:6px;margin-bottom:12px;">' +
+        '<button data-v="A3" style="' + bBase + '">A3 (420 × 297 mm)</button>' +
+        '<button data-v="A2" style="' + bBase + '">A2 (594 × 420 mm)</button></div>' +
+      '<div style="font-size:12px;font-weight:700;color:#555;margin-bottom:5px;">STOP-NAME SIZE (pt)</div>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">' +
+        '<input id="pk-pt" type="number" min="4" max="40" step="0.5" ' +
+        'style="width:90px;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;">' +
+        '<span id="pk-pt-note" style="font-size:12px;color:#666;">auto for chosen paper</span></div>' +
+      '<div id="pk-info" style="font-size:12px;color:#444;background:#f3f4f6;border-radius:6px;' +
+        'padding:8px 10px;line-height:1.5;min-height:34px;"></div>' +
+      '<div style="font-size:12px;font-weight:700;color:#555;margin:12px 0 5px;">PREVIEW (what will be downloaded)</div>' +
+      '<div id="pk-prev" style="background:#d1d5db;border-radius:6px;padding:12px;text-align:center;' +
+        'min-height:140px;max-height:44vh;overflow:auto;box-sizing:border-box;">' +
+        '<div id="pk-prev-note" style="font-size:12px;color:#555;padding:50px 0;">Generating preview…</div>' +
+        '<img id="pk-img" alt="Print preview" style="display:none;max-width:100%;background:#fff;' +
+        'box-shadow:0 2px 10px rgba(0,0,0,.35);margin:0 auto;"></div>' +
+      '<div id="pk-msg" style="font-size:12px;margin-top:8px;min-height:16px;"></div>' +
+      '<div style="display:flex;gap:8px;margin-top:10px;">' +
+        '<button id="pk-cancel" style="' + bBase + '">Close</button>' +
+        '<button id="pk-go" style="' + bBase + 'background:#1d4ed8;border-color:#1d4ed8;color:#fff;font-weight:700;">⬇ Download</button>' +
+      '</div></div>';
+    (cfg.wrapper || document.body).appendChild(ov);
+
+    function q(id) { return ov.querySelector(id); }
+    function msg(t, color) { var m = q('#pk-msg'); m.textContent = t || ''; m.style.color = color || '#444'; }
+    function paintSeg(id, val) {
+      Array.prototype.forEach.call(q(id).children, function (b) {
+        var on = b.getAttribute('data-v') === val;
+        b.style.background = on ? '#1d4ed8' : '#fff';
+        b.style.color = on ? '#fff' : '#222';
+        b.style.borderColor = on ? '#1d4ed8' : '#ccc';
+      });
+    }
+
+    function curPt() { return st.pt != null ? st.pt : PAPERS[st.paper].stopPt; }
+    function keyNow() { return st.fmt + '|' + st.paper + '|' + curPt(); }
+    function schedulePreview() {
+      clearTimeout(st.timer);
+      st.cache = null;
+      var note = q('#pk-prev-note'), img = q('#pk-img');
+      note.style.display = 'block'; note.textContent = 'Generating preview…'; img.style.display = 'none';
+      st.timer = setTimeout(runPreview, 350);
+    }
+    async function runPreview() {
+      var token = ++st.pseq, key = keyNow();
+      var note = q('#pk-prev-note'), img = q('#pk-img');
+      try {
+        var r = await cfg.render(st.paper, st.fmt, curPt());
+        if (token !== st.pseq) return;
+        st.cache = {key: key, r: r};
+        var url = URL.createObjectURL(new Blob([r.svg], {type: 'image/svg+xml;charset=utf-8'}));
+        img.onload = function () { note.style.display = 'none'; img.style.display = 'block'; };
+        img.onerror = function () { note.style.display = 'block'; note.textContent = 'Preview could not be drawn (download may still work).'; };
+        if (st.url) URL.revokeObjectURL(st.url);
+        st.url = url; ov._pkUrl = url; img.src = url;
+      } catch (e) {
+        if (token !== st.pseq) return;
+        note.style.display = 'block'; note.textContent = 'Preview failed: ' + (e && e.message ? e.message : e);
+      }
+    }
+    async function refresh() {
+      paintSeg('#pk-fmt', st.fmt); paintSeg('#pk-paper', st.paper);
+      var token = ++st.seq, box = q('#pk-info');
+      var ptEl = q('#pk-pt');
+      var dflt = PAPERS[st.paper].stopPt;
+      if (st.pt == null) { ptEl.value = dflt; q('#pk-pt-note').textContent = 'auto for ' + st.paper; }
+      else { q('#pk-pt-note').textContent = 'custom (auto = ' + dflt + ')'; }
+      try {
+        var r = await cfg.info(st.paper);
+        if (token !== st.seq) return;
+        var pg = r.pg, lines = [];
+        lines.push('<b>' + st.paper + ' ' + (pg.landscape ? 'landscape' : 'portrait') + '</b> · ' + pg.W + ' × ' + pg.H + ' mm');
+        if (st.fmt === 'svg') lines.push('Vector file sized exactly to the sheet (scales without loss).');
+        else lines.push('Image: ' + Math.round(pg.W / 25.4 * DPI) + ' × ' + Math.round(pg.H / 25.4 * DPI) + ' px at ' + DPI + ' DPI' +
+                        (st.fmt === 'pdf' ? ', placed on a ' + st.paper + ' PDF page.' : '.'));
+        if (r.curPt) lines.push('Stop names without resizing would print at ≈ ' + r.curPt.toFixed(1) + ' pt.');
+        box.innerHTML = lines.join('<br>');
+      } catch (e) { if (token === st.seq) box.textContent = ''; }
+    }
+
+    q('#pk-fmt').addEventListener('click', function (e) {
+      var v = e.target.getAttribute && e.target.getAttribute('data-v');
+      if (v) { st.fmt = v; saved.fmt = v; refresh(); schedulePreview(); }
+    });
+    q('#pk-paper').addEventListener('click', function (e) {
+      var v = e.target.getAttribute && e.target.getAttribute('data-v');
+      if (v) { st.paper = v; saved.paper = v; refresh(); schedulePreview(); }
+    });
+    q('#pk-pt').addEventListener('input', function () {
+      var v = parseFloat(this.value);
+      st.pt = (isFinite(v) && v > 0) ? v : null;
+      q('#pk-pt-note').textContent = st.pt == null ? 'auto for ' + st.paper : 'custom (auto = ' + PAPERS[st.paper].stopPt + ')';
+      schedulePreview();
+    });
+    q('#pk-cancel').addEventListener('click', close);
+    ov.addEventListener('mousedown', function (e) { if (e.target === ov) close(); });
+    ['wheel', 'pointerdown', 'touchstart'].forEach(function (n) {
+      ov.addEventListener(n, function (e) { e.stopPropagation(); }, {passive: true});
+    });
+
+    q('#pk-go').addEventListener('click', async function () {
+      if (st.busy) return;
+      st.busy = true; this.disabled = true; this.style.opacity = '.6';
+      msg('Preparing ' + st.fmt.toUpperCase() + ' (' + st.paper + ')… large sheets can take a few seconds.');
+      try {
+        var r = (st.cache && st.cache.key === keyNow()) ? st.cache.r : await cfg.render(st.paper, st.fmt, curPt());
+        var blob;
+        if (st.fmt === 'svg') {
+          blob = new Blob([r.svg], {type: 'image/svg+xml'});
+        } else {
+          var pxW = Math.round(r.pg.W / 25.4 * DPI), pxH = Math.round(r.pg.H / 25.4 * DPI);
+          var canvas = await svgToCanvas(r.svg, pxW, pxH);
+          if (st.fmt === 'png') {
+            blob = await new Promise(function (res) { canvas.toBlob(res, 'image/png'); });
+          } else {
+            blob = await pdfBlob(canvas, r.pg);
+          }
+          canvas.width = 0; canvas.height = 0;
+        }
+        if (!blob) throw new Error('Export failed (the sheet may be too large for this browser).');
+        download(blob, cfg.basename + '_' + st.paper + '_' + (r.pg.landscape ? 'landscape' : 'portrait') + '.' + st.fmt);
+        msg('✔ Download started.', '#15803d');
+      } catch (e) {
+        msg('✖ ' + (e && e.message ? e.message : e), '#b91c1c');
+      } finally {
+        st.busy = false; this.disabled = false; this.style.opacity = '1';
+      }
+    });
+
+    refresh();
+    schedulePreview();
+  }
+
+  return {PAPERS: PAPERS, page: page, fit: fit, median: median, labelFactor: labelFactor,
+          pageSvg: pageSvg, esc: esc, open: open, close: close};
+})();
+'''
+
+LOOM_PRINT_JS = r'''(function () {
+  var XLINK = 'http://www.w3.org/1999/xlink';
+
+  function pathPts(d) {
+    var re = /([A-Za-z])\s*(-?[\d.eE+]+)[\s,]+(-?[\d.eE+]+)/g, m, out = [];
+    while ((m = re.exec(d || ''))) out.push([m[1], parseFloat(m[2]), parseFloat(m[3])]);
+    return out;
+  }
+
+  // Grow/shrink every station label by k the same way the server-side
+  // label-size slider does: font, per-glyph offsets, textPath length, clip box.
+  function scaleLabels(svgEl, recs, k) {
+    var pathById = {};
+    Array.prototype.forEach.call(svgEl.querySelectorAll('path[id]'), function (p) { pathById[p.getAttribute('id')] = p; });
+    var stretch = Math.max(k, 1) * 1.15, doneP = {}, doneC = {};
+
+    recs.forEach(function (o) {
+      var el = o.el;
+      var kids = Array.prototype.slice.call(el.querySelectorAll('*')).filter(function (c) {
+        return c.getAttribute('font-size') || (c.style && c.style.fontSize);
+      });
+      var kidFs = kids.map(function (c) { return parseFloat(getComputedStyle(c).fontSize); });
+      el.style.fontSize = (o.fs * k) + 'px';
+      kids.forEach(function (c, i) { if (kidFs[i] > 0) c.style.fontSize = (kidFs[i] * k) + 'px'; });
+
+      el.removeAttribute('textLength'); el.removeAttribute('lengthAdjust');
+      var tspans = Array.prototype.slice.call(el.querySelectorAll('tspan'));
+      var ax = parseFloat(el.getAttribute('x'));
+      if (!isFinite(ax)) {
+        for (var i = 0; i < tspans.length; i++) {
+          var t = parseFloat(tspans[i].getAttribute('x'));
+          if (isFinite(t)) { ax = t; break; }
+        }
+      }
+      tspans.forEach(function (ts) {
+        ts.removeAttribute('textLength'); ts.removeAttribute('lengthAdjust');
+        var x = parseFloat(ts.getAttribute('x'));
+        if (isFinite(x) && isFinite(ax)) ts.setAttribute('x', String(ax + (x - ax) * k));
+        ['dx', 'dy'].forEach(function (a) {
+          var v = parseFloat(ts.getAttribute(a));
+          if (isFinite(v)) ts.setAttribute(a, String(v * k));
+        });
+      });
+
+      Array.prototype.forEach.call(el.querySelectorAll('textPath'), function (tp) {
+        var href = tp.getAttributeNS(XLINK, 'href') || tp.getAttribute('href') || '';
+        var id = href.split('#').pop();
+        var pe = pathById[id];
+        if (!pe || doneP[id] || stretch === 1) return;
+        doneP[id] = true;
+        var segs = pathPts(pe.getAttribute('d'));
+        if (segs.length < 2) return;
+        var anchor = (tp.getAttribute('text-anchor') || el.getAttribute('text-anchor') || '').toLowerCase();
+        var off = (tp.getAttribute('startOffset') || '').toLowerCase();
+        var first = segs[0], last = segs[segs.length - 1], ref;
+        if (anchor === 'end' || off === '100%' || off === 'end') ref = [last[1], last[2]];
+        else if (anchor === 'middle' || off === '50%') ref = [(first[1] + last[1]) / 2, (first[2] + last[2]) / 2];
+        else ref = [first[1], first[2]];
+        var xs = segs.map(function (s) { return s[1]; }), ys = segs.map(function (s) { return s[2]; });
+        var horiz = (Math.max.apply(null, xs) - Math.min.apply(null, xs)) >= (Math.max.apply(null, ys) - Math.min.apply(null, ys));
+        var d = segs.map(function (s) {
+          return horiz ? (s[0] + ' ' + (ref[0] + (s[1] - ref[0]) * stretch).toFixed(3) + ' ' + s[2].toFixed(3))
+                       : (s[0] + ' ' + s[1].toFixed(3) + ' ' + (ref[1] + (s[2] - ref[1]) * stretch).toFixed(3));
+        }).join(' ');
+        pe.setAttribute('d', d);
+      });
+
+      // enlarge the clip box that limits this label, if any, so bigger text is not cut off
+      var cur = el;
+      while (cur && cur !== svgEl.parentNode) {
+        var cp = cur.getAttribute && (cur.getAttribute('clip-path') || '');
+        var mm = /url\(#([^)]+)\)/.exec(cp);
+        if (mm) {
+          var cid = mm[1], cpe = svgEl.querySelector('[id="' + cid + '"]');
+          if (cpe && !doneC[cid] && k > 1) {
+            doneC[cid] = true;
+            Array.prototype.forEach.call(cpe.querySelectorAll('rect'), function (r) {
+              var x = parseFloat(r.getAttribute('x') || 0), y = parseFloat(r.getAttribute('y') || 0);
+              var w = parseFloat(r.getAttribute('width') || 0), h = parseFloat(r.getAttribute('height') || 0);
+              r.setAttribute('x', String(x - (w * k - w) / 2)); r.setAttribute('y', String(y - (h * k - h) / 2));
+              r.setAttribute('width', String(w * k)); r.setAttribute('height', String(h * k));
+            });
+          }
+          break;
+        }
+        cur = cur.parentNode;
+      }
+    });
+  }
+
+  // Builds the sheet-sized SVG. apply=false only measures (used for the dialog preview).
+  async function prepare(paperKey, format, pt, apply) {
+    var src = (format === 'svg') ? loomExportSvgDataUrl : loomCompositeSvgDataUrl;
+    var txt = await (await fetch(src)).text();
+    if (apply && window.loomEditHasChanges && window.loomEditHasChanges()) {
+      txt = window.loomEditApplyToSvgText(txt);
+    }
+    var doc = new DOMParser().parseFromString(txt, 'image/svg+xml');
+    if (doc.getElementsByTagName('parsererror').length) throw new Error('Could not read the map SVG.');
+    var root = doc.documentElement;
+    var vb = (root.getAttribute('viewBox') || '').replace(/,/g, ' ').trim().split(/\s+/).map(parseFloat);
+    var tw, th;
+    if (vb.length === 4 && vb[2] > 0 && vb[3] > 0) { tw = vb[2]; th = vb[3]; }
+    else {
+      tw = parseFloat(root.getAttribute('width')) || 1600;
+      th = parseFloat(root.getAttribute('height')) || 1200;
+      root.setAttribute('viewBox', '0 0 ' + tw + ' ' + th);
+    }
+    var pg = PrintKit.page(paperKey, tw / th);
+    var f = PrintKit.fit(pg, tw, th);
+
+    var host = document.createElement('div');
+    host.style.cssText = 'position:fixed;left:-100000px;top:0;width:' + tw + 'px;height:' + th +
+                         'px;visibility:hidden;pointer-events:none;';
+    var svgEl = document.importNode(root, true);
+    svgEl.setAttribute('width', tw); svgEl.setAttribute('height', th);
+    host.appendChild(svgEl);
+    document.body.appendChild(host);
+    try {
+      var recs = [], effs = [];
+      Array.prototype.forEach.call(svgEl.querySelectorAll('text.station-label'), function (el) {
+        var fs = parseFloat(getComputedStyle(el).fontSize);
+        if (!(fs > 0)) return;
+        var m = el.getCTM ? el.getCTM() : null;
+        effs.push(fs * (m ? Math.hypot(m.a, m.b) : 1));
+        recs.push({el: el, fs: fs});
+      });
+      var lf = PrintKit.labelFactor(PrintKit.median(effs), f.s, pt);
+      if (!apply) return {pg: pg, curPt: lf.curPt};
+
+      if (recs.length && Math.abs(lf.k - 1) > 0.005) scaleLabels(svgEl, recs, lf.k);
+      svgEl.setAttribute('x', f.x.toFixed(3)); svgEl.setAttribute('y', f.y.toFixed(3));
+      svgEl.setAttribute('width', f.w.toFixed(3)); svgEl.setAttribute('height', f.h.toFixed(3));
+      var out = PrintKit.pageSvg(pg, new XMLSerializer().serializeToString(svgEl));
+      return {pg: pg, svg: out, curPt: lf.curPt};
+    } finally {
+      host.remove();
+    }
+  }
+
+  window.loomPrintOpen = function () {
+    PrintKit.open({
+      wrapper: document.getElementById('loom-wrapper'),
+      basename: 'loom_transit_map',
+      info: function (paper) { return prepare(paper, 'png', 0, false); },
+      render: function (paper, fmt, pt) { return prepare(paper, fmt, pt, true); }
+    });
+  };
+})();
+'''
+
+TRANSIT_PRINT_JS = r'''(function () {
+  var LEGEND = __LEGEND_JSON__;
+  var GAP = 10;
+
+  function isStopAnn(a) { return a && a.showarrow === false && a.xref === 'x' && a.yref === 'y' && a.text; }
+
+  // Routes / Symbols legend as SVG, in the same pixel space as the map.
+  function legendSvg(W) {
+    var cv = document.createElement('canvas').getContext('2d');
+    var E = PrintKit.esc;
+    function tw(t, px, w) { cv.font = (w ? w + ' ' : '') + px + 'px Arial, sans-serif'; return cv.measureText(t).width; }
+    function wrap(t, px, maxW) {
+      cv.font = px + 'px Arial, sans-serif';
+      var words = String(t).split(' '), lines = [], line = '';
+      words.forEach(function (wd) {
+        var test = line ? line + ' ' + wd : wd;
+        if (cv.measureText(test).width > maxW && line) { lines.push(line); line = wd; } else line = test;
+      });
+      if (line) lines.push(line);
+      return lines.length ? lines : [''];
+    }
+    function trunc(t, px, maxW) {
+      t = String(t); cv.font = px + 'px Arial, sans-serif';
+      if (cv.measureText(t).width <= maxW) return t;
+      while (t.length > 1 && cv.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+      return t + '…';
+    }
+    var pad = 14, colW = 190, gx = 20, gy = 12, glyph = 22, fs = 13, afs = 11, hfs = 15, rowH = 20;
+    var symW = tw('Symbols', hfs, '700');
+    LEGEND.symbols.forEach(function (s) { symW = Math.max(symW, glyph + 4 + tw(s.label, fs)); });
+    var perRow = Math.max(1, Math.floor((W - 2 * pad - symW - 30 + gx) / (colW + gx)));
+    var entries = [];
+    LEGEND.groups.forEach(function (g) {
+      g.routes.forEach(function (r) {
+        entries.push({agency: trunc(g.agency, afs, colW), lines: wrap(r.name, fs, colW - glyph), color: r.color});
+      });
+    });
+    var lineH = fs * 1.3, aH = afs * 1.3, rows = [];
+    for (var i = 0; i < entries.length; i += perRow) rows.push(entries.slice(i, i + perRow));
+    var rowHs = rows.map(function (r) {
+      return Math.max.apply(null, r.map(function (e) { return aH + 3 + e.lines.length * lineH; }));
+    });
+    var routesH = rowHs.reduce(function (a, b) { return a + b; }, 0) + Math.max(0, rows.length - 1) * gy;
+    var boxH = Math.ceil(pad * 2 + hfs + 8 + Math.max(routesH, LEGEND.symbols.length * rowH));
+    var x2 = W - pad - symW - 10, p = [];
+    p.push('<rect x="0.5" y="0.5" width="' + (W - 1) + '" height="' + (boxH - 1) + '" fill="#fafafa" stroke="#d0d0d0"/>');
+    p.push('<text x="' + pad + '" y="' + (pad + hfs) + '" font-family="Arial, sans-serif" font-size="' + hfs + '" font-weight="700" fill="#111">Routes</text>');
+    p.push('<text x="' + x2 + '" y="' + (pad + hfs) + '" font-family="Arial, sans-serif" font-size="' + hfs + '" font-weight="700" fill="#111">Symbols</text>');
+    var y = pad + hfs + 8;
+    rows.forEach(function (r, ri) {
+      var x = pad;
+      r.forEach(function (e) {
+        p.push('<text x="' + x + '" y="' + (y + afs) + '" font-family="Arial, sans-serif" font-size="' + afs + '" fill="#666">' + E(e.agency) + '</text>');
+        var sy = y + aH + 3;
+        p.push('<rect x="' + x + '" y="' + (sy + fs * 0.45) + '" width="16" height="4" fill="' + E(e.color) + '"/>');
+        e.lines.forEach(function (ln, li) {
+          p.push('<text x="' + (x + glyph) + '" y="' + (sy + fs + li * lineH) + '" font-family="Arial, sans-serif" font-size="' + fs + '" fill="#222">' + E(ln) + '</text>');
+        });
+        x += colW + gx;
+      });
+      y += rowHs[ri] + gy;
+    });
+    var ys = pad + hfs + 8 + rowH * 0.75;
+    LEGEND.symbols.forEach(function (s) {
+      if (s.type === 'line') p.push('<rect x="' + x2 + '" y="' + (ys - 6) + '" width="16" height="4" fill="' + E(s.color) + '"/>');
+      else if (s.type === 'circle') p.push('<circle cx="' + (x2 + 8) + '" cy="' + (ys - 4) + '" r="' + s.radius + '" fill="#fff" stroke="' + E(s.color) + '" stroke-width="2"/>');
+      p.push('<text x="' + (x2 + glyph + 4) + '" y="' + ys + '" font-family="Arial, sans-serif" font-size="' + fs + '" fill="#222">' + E(s.label) + '</text>');
+      ys += rowH;
+    });
+    return {svg: p.join(''), h: boxH};
+  }
+
+  function plan(paperKey, pt) {
+    var gd = document.getElementById('transit-plot-div');
+    if (!gd || !window.Plotly || !gd._fullLayout) throw new Error('The map is still loading - try again in a moment.');
+    var W0 = Math.round(gd._fullLayout.width), H0 = Math.round(gd._fullLayout.height);
+    var leg = legendSvg(W0), TH = H0 + GAP + leg.h;
+    var pg = PrintKit.page(paperKey, W0 / TH), f = PrintKit.fit(pg, W0, TH);
+    var sizes = (gd.layout.annotations || []).filter(isStopAnn).map(function (a) { return (a.font && a.font.size) || 12; });
+    var lf = PrintKit.labelFactor(PrintKit.median(sizes), f.s, pt);
+    return {gd: gd, W0: W0, H0: H0, leg: leg, TH: TH, pg: pg, f: f, lf: lf};
+  }
+
+  async function render(paperKey, fmt, pt) {
+    var P = plan(paperKey, pt), gd = P.gd;
+    var layout = JSON.parse(JSON.stringify(gd.layout));
+    var data = JSON.parse(JSON.stringify(gd.data));
+    layout.width = P.W0; layout.height = P.H0; layout.autosize = false;
+    ['xaxis', 'yaxis'].forEach(function (ax) {          // keep exactly what is on screen
+      var fl = gd._fullLayout[ax];
+      if (fl && fl.range) { layout[ax] = layout[ax] || {}; layout[ax].range = fl.range.slice(); layout[ax].autorange = false; }
+    });
+    if (Math.abs(P.lf.k - 1) > 0.005) {
+      (layout.annotations || []).forEach(function (a) {
+        if (isStopAnn(a)) { a.font = a.font || {}; a.font.size = ((a.font.size) || 12) * P.lf.k; }
+      });
+    }
+    var host = document.createElement('div');
+    host.style.cssText = 'position:fixed;left:-100000px;top:0;width:' + P.W0 + 'px;height:' + P.H0 + 'px;';
+    document.body.appendChild(host);
+    var url;
+    try {
+      await Plotly.newPlot(host, data, layout, {staticPlot: true, displayModeBar: false, responsive: false});
+      url = await Plotly.toImage(host, {format: 'svg', width: P.W0, height: P.H0});
+    } finally {
+      try { Plotly.purge(host); } catch (e) {}
+      host.remove();
+    }
+    var body = url.substring(url.indexOf(',') + 1);
+    var mapSvg = /;base64,/.test(url.substring(0, url.indexOf(',') + 1)) ? atob(body) : decodeURIComponent(body);
+    mapSvg = mapSvg.replace(/<\?xml[^>]*\?>/, '').replace(/<!DOCTYPE[^>]*>/, '');
+    mapSvg = mapSvg.replace(/<svg\b([^>]*)>/, function (m, a) {
+      a = a.replace(/\s(width|height|x|y)="[^"]*"/g, '');
+      if (!/viewBox=/.test(a)) a += ' viewBox="0 0 ' + P.W0 + ' ' + P.H0 + '"';
+      return '<svg' + a + ' x="0" y="0" width="' + P.W0 + '" height="' + P.H0 + '">';
+    });
+    var inner = '<svg x="' + P.f.x.toFixed(3) + '" y="' + P.f.y.toFixed(3) + '" width="' + P.f.w.toFixed(3) +
+      '" height="' + P.f.h.toFixed(3) + '" viewBox="0 0 ' + P.W0 + ' ' + P.TH + '">' +
+      '<rect x="0" y="0" width="' + P.W0 + '" height="' + P.TH + '" fill="#ffffff"/>' + mapSvg +
+      '<g transform="translate(0,' + (P.H0 + GAP) + ')">' + P.leg.svg + '</g></svg>';
+    return {pg: P.pg, svg: PrintKit.pageSvg(P.pg, inner)};
+  }
+
+  window.transitPrintOpen = function () {
+    PrintKit.open({
+      wrapper: document.getElementById('transit-wrapper'),
+      basename: 'transit_map',
+      info: async function (paper) { var P = plan(paper, 0); return {pg: P.pg, curPt: P.lf.curPt}; },
+      render: render
+    });
+  };
+})();
+'''
+
+
+LOOM_HOVER_JS = r'''(function () {
+  var img = document.getElementById('loom-img');
+  var wrap = document.getElementById('loom-wrapper');
+  if (!img || !wrap) return;
+
+  var tip = document.getElementById('loom-hover-tip');
+  if (!tip) { tip = document.createElement('div'); tip.id = 'loom-hover-tip'; wrap.appendChild(tip); }
+  var ICON = {stop: '\uD83D\uDE8F ', road: '\uD83D\uDEE3 ', river: '\uD83C\uDF0A ', lm: '\uD83D\uDCCD '};
+
+  function clean(t) {
+    t = String(t || '').replace(/\s+/g, ' ').trim();
+    var m = /^(.+?) \1$/.exec(t);          // LOOM sometimes writes a label twice
+    return m ? m[1] : t;
+  }
+  function svgEl() { return img.querySelector('svg'); }
+
+  // ---- stop markers: cached, stored in the SVG's own coordinate space ----
+  var index = null;
+  function buildIndex() {
+    var svg = svgEl(); if (!svg) return null;
+    var ctm = svg.getScreenCTM(); if (!ctm) return null;
+    var M = ctm.inverse(), pt = svg.createSVGPoint();
+    function root(x, y) { pt.x = x; pt.y = y; var p = pt.matrixTransform(M); return {x: p.x, y: p.y}; }
+    function rect(el) {
+      var r = el.getBoundingClientRect(), a = root(r.left, r.top), b = root(r.right, r.bottom);
+      return {x0: Math.min(a.x, b.x), y0: Math.min(a.y, b.y), x1: Math.max(a.x, b.x), y1: Math.max(a.y, b.y)};
+    }
+    function dRect(x, y, r) {
+      var dx = Math.max(r.x0 - x, 0, x - r.x1), dy = Math.max(r.y0 - y, 0, y - r.y1);
+      return Math.hypot(dx, dy);
+    }
+    var labels = [];
+    Array.prototype.forEach.call(svg.querySelectorAll('text.station-label'), function (lb) {
+      var n = clean(lb.textContent); if (n) labels.push({name: n, rect: rect(lb)});
+    });
+    var markers = [];
+    Array.prototype.forEach.call(svg.querySelectorAll('[class*="station"]'), function (el) {
+      var cls = (el.getAttribute('class') || '').toLowerCase();
+      var tag = el.tagName.toLowerCase();
+      if (cls.indexOf('label') >= 0) return;
+      if (['path', 'circle', 'ellipse', 'polygon', 'rect'].indexOf(tag) < 0) return;
+      if (el.closest('g.loom-landmark')) return;
+      var r = rect(el), w = r.x1 - r.x0, h = r.y1 - r.y0;
+      if (!(w > 0 || h > 0)) return;
+      var cx = (r.x0 + r.x1) / 2, cy = (r.y0 + r.y1) / 2, best = null, bd = 1e9;
+      labels.forEach(function (l) { var d = dRect(cx, cy, l.rect); if (d < bd) { bd = d; best = l; } });
+      if (best && bd < 70) markers.push({cx: cx, cy: cy, r: Math.max(w, h) / 2, name: best.name});
+    });
+    return {markers: markers, M: M};
+  }
+
+  function nameAt(ev) {
+    var svg = svgEl(); if (!svg) return null;
+    var ctm = svg.getScreenCTM(); if (!ctm) return null;
+    var scale = Math.hypot(ctm.a, ctm.b) || 1;
+    var pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
+    var P = pt.matrixTransform(ctm.inverse());
+
+    // 1) landmark icon
+    var t = ev.target;
+    var lm = t && t.closest && t.closest('g.loom-landmark');
+    if (lm) { var ln = lm.getAttribute('data-landmark-name'); if (ln) return ICON.lm + ln; }
+
+    // 2) bus stop marker (generous hit radius so small dots are easy to hover)
+    if (!index) index = buildIndex();
+    if (index) {
+      var best = null, bd = 1e9;
+      index.markers.forEach(function (m) {
+        var d = Math.hypot(P.x - m.cx, P.y - m.cy), lim = Math.max(m.r + 3 / scale, 9 / scale);
+        if (d <= lim && d < bd) { bd = d; best = m; }
+      });
+      if (best) return ICON.stop + best.name;
+    }
+
+    // 3) stop-name text itself
+    var labs = svg.querySelectorAll('text.station-label');
+    for (var i = 0; i < labs.length; i++) {
+      var r = labs[i].getBoundingClientRect(), pad = 2;
+      if (ev.clientX >= r.left - pad && ev.clientX <= r.right + pad && ev.clientY >= r.top - pad && ev.clientY <= r.bottom + pad) {
+        var n = clean(labs[i].textContent); if (n) return ICON.stop + n;
+      }
+    }
+
+    // 4) road / river under the cursor, even beneath route lines
+    var stack = document.elementsFromPoint ? document.elementsFromPoint(ev.clientX, ev.clientY) : [t];
+    for (var j = 0; j < stack.length; j++) {
+      var el = stack[j];
+      if (!el.tagName || el.tagName.toLowerCase() !== 'path') continue;
+      var title = el.querySelector && el.querySelector('title');
+      var nm = title ? clean(title.textContent) : '';
+      if (!nm) continue;
+      if (el.closest('g.loom-road')) return ICON.road + nm;
+      if (el.closest('g.loom-river')) return ICON.river + nm;
+    }
+    return null;
+  }
+
+  function show(text, ev) {
+    tip.textContent = text; tip.style.display = 'block';
+    var w = wrap.getBoundingClientRect();
+    var x = ev.clientX - w.left + 14, y = ev.clientY - w.top + 14;
+    tip.style.left = Math.min(Math.max(6, x), Math.max(6, w.width - tip.offsetWidth - 6)) + 'px';
+    tip.style.top = Math.min(Math.max(6, y), Math.max(6, w.height - tip.offsetHeight - 6)) + 'px';
+  }
+  function hide() { tip.style.display = 'none'; }
+
+  var pending = null, raf = 0, touchTimer = 0;
+  function handle(ev) {
+    var dragging = (typeof loomDragging !== 'undefined') && loomDragging;
+    if (dragging || img.classList.contains('ed-on')) { hide(); return; }
+    var name = nameAt(ev);
+    if (name) show(name, ev); else hide();
+  }
+  img.addEventListener('pointermove', function (ev) {
+    if (ev.pointerType === 'touch') return;
+    pending = ev;
+    if (raf) return;
+    raf = requestAnimationFrame(function () { raf = 0; if (pending) handle(pending); });
+  }, true);
+  img.addEventListener('pointerleave', hide);
+  img.addEventListener('pointerdown', function (ev) {
+    hide();
+    if (ev.pointerType === 'touch') {            // tap on touch screens
+      clearTimeout(touchTimer);
+      touchTimer = setTimeout(function () { handle(ev); setTimeout(hide, 2500); }, 60);
+    }
+  }, true);
+  window.addEventListener('resize', function () { index = null; });
+  document.addEventListener('fullscreenchange', function () { index = null; });
+  window.loomHoverReset = function () { index = null; };
+})();
+'''
+
+
 def display_loom_svg(
     svg, selected_routes, route_name_map, route_color_hex_map,
     route_agency_map=None,
@@ -6252,7 +7026,7 @@ def display_loom_svg(
         route_name_map,
         route_color_hex_map,
         route_agency_map=route_agency_map,
-        title_text="Transit Map of Kathmandu Valley",
+        title_text=TITLE,
     )
 
     composite_b64 = base64.b64encode(
@@ -6352,13 +7126,15 @@ def display_loom_svg(
         'font-weight:400; line-height:1.2; color:#222;">Station name</div>'
     )
 
-    # Stable edit-key: keyed by the selected routes, NOT the SVG bytes.
-    # The SVG changes slightly on every regeneration, so hashing it made
-    # the in-browser Edit mode lose saved icon/label positions whenever
-    # the map was re-rendered. Route selection is stable across re-runs,
-    # so edits persist (until a different route set is chosen).
+    # Keep edits through normal SVG regenerations, but reset them when the
+    # city or landmark coordinates/scales change so old offsets cannot
+    # override updated geographic positions.
     loom_edit_key = hashlib.md5(
-        "|".join(sorted(selected_routes)).encode("utf-8")
+        "|".join((
+            CITY,
+            *sorted(selected_routes),
+            landmark_layout_signature(),
+        )).encode("utf-8")
     ).hexdigest()[:12]
     loom_edit_js = LOOM_EDIT_JS.replace("__EDIT_KEY__", loom_edit_key)
 
@@ -6387,7 +7163,7 @@ def display_loom_svg(
       </style>
       <div id="loom-toolbar" style="display:flex; gap:6px; align-items:center;
            flex-wrap:wrap; padding:6px 10px; background:#f3f4f6; border-bottom:1px solid #ddd;">
-        <span style="font-size:13px; color:#555; margin-right:auto;">Transit Map of Kathmandu Valley</span>
+        <span style="font-size:13px; color:#555; margin-right:auto;">{TITLE}</span>
         <button onclick="loomZoom(1.25)"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
                        border:1px solid #ccc; background:#fff;">➕ Zoom In</button>
@@ -6403,12 +7179,10 @@ def display_loom_svg(
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
                        border:1px solid #1d4ed8; background:#fff; color:#1d4ed8;">✏️ Edit</button>
         <span style="width:1px; height:22px; background:#ccc; margin:0 4px;"></span>
-        <button onclick="loomDownloadSVG()"
+        <button id="loom-print-btn" onclick="window.loomPrintOpen && window.loomPrintOpen()"
+                title="Print / export as SVG, PNG or PDF on A3 or A2"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
-                       border:1px solid #ccc; background:#fff;">⬇ SVG</button>
-        <button onclick="loomDownloadPNG()"
-                style="padding:4px 10px; cursor:pointer; border-radius:6px;
-                       border:1px solid #ccc; background:#fff;">⬇ PNG</button>
+                       border:1px solid #ccc; background:#fff;">🖨 Print</button>
         <button onclick="loomFullscreen()"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
                        border:1px solid #ccc; background:#fff;">
@@ -6596,88 +7370,6 @@ def display_loom_svg(
                 group.addEventListener('focus', function() {{ showLandmarkLabel(group); }});
             }});
 
-            // ---- HOVER TOOLTIP -----------------------------------------
-            // A floating name card that follows the cursor over landmarks,
-            // roads, rivers and route lines. Names come from each element's
-            // existing <title> child (already generated for roads) or from
-            // data attributes for landmarks; stops use the nearest station
-            // label text. The custom card is styled and immediate, unlike
-            // the slow native SVG <title> tooltip.
-            const hoverTip = document.createElement('div');
-            hoverTip.id = 'loom-hover-tip';
-            document.getElementById('loom-wrapper').appendChild(hoverTip);
-            let hoverTarget = null;
-
-            function loomHoverName(el) {{
-                // Landmark groups: use their data name.
-                const lm = el.closest && el.closest('g.loom-landmark');
-                if (lm) {{
-                    const name = lm.getAttribute('data-landmark-name');
-                    return name ? '\\uD83D\\uDCFD ' + name : null;
-                }}
-                // Roads / rivers: <title> child carries the name.
-                if (el.tagName && el.tagName.toLowerCase() === 'path') {{
-                    const inRoad = el.closest && el.closest('g.loom-road');
-                    const inRiver = el.closest && el.closest('g.loom-river');
-                    const t = el.querySelector('title');
-                    const name = t ? t.textContent.trim() : null;
-                    if (inRoad && name) return '\\uD83D\\uDEE3 ' + name;
-                    if (inRiver && name) return '\\uD83D\\uDE6E ' + name;
-                    if (name) return name;
-                }}
-                // Stop markers (LOOM station symbols): nearest label text.
-                if (el.tagName && el.tagName.toLowerCase() === 'circle') {{
-                    const cx = parseFloat(el.getAttribute('cx'));
-                    const cy = parseFloat(el.getAttribute('cy'));
-                    if (!isNaN(cx) && !isNaN(cy)) {{
-                        let best = null, bestD = 1e9;
-                        document.querySelectorAll('#loom-img text.station-label').forEach(function (lb) {{
-                            const b = lb.getBBox();
-                            const bx = b.x + b.width / 2, by = b.y + b.height / 2;
-                            const d = Math.hypot(bx - cx, by - cy);
-                            if (d < bestD) {{ bestD = d; best = lb; }}
-                        }});
-                        if (best && bestD < 40) {{
-                            const name = (best.textContent || '').replace(/\\s+/g, ' ').trim();
-                            if (name) return '\\uD83D\\uDE8F ' + name;
-                        }}
-                    }}
-                }}
-                return null;
-            }}
-
-            function loomShowTip(text, ev) {{
-                hoverTip.textContent = text;
-                hoverTip.style.display = 'block';
-                loomPositionTip(ev);
-            }}
-            function loomPositionTip(ev) {{
-                const wrap = document.getElementById('loom-wrapper').getBoundingClientRect();
-                const x = ev.clientX - wrap.left + 14;
-                const y = ev.clientY - wrap.top + 14;
-                hoverTip.style.left = Math.min(Math.max(6, x), wrap.width - hoverTip.offsetWidth - 6) + 'px';
-                hoverTip.style.top = Math.min(Math.max(6, y), wrap.height - hoverTip.offsetHeight - 6) + 'px';
-            }}
-            function loomHideTip() {{
-                hoverTip.style.display = 'none';
-            }}
-
-            loomImg.addEventListener('pointermove', function (event) {{
-                // Ignore while panning or while Edit mode is active.
-                if (loomDragging || (loomImg.classList.contains('ed-on'))) {{ loomHideTip(); return; }}
-                const target = event.target;
-                const name = target === hoverTarget ? hoverTip.dataset.name : loomHoverName(target);
-                if (name) {{
-                    if (target !== hoverTarget) {{ hoverTarget = target; hoverTip.dataset.name = name; }}
-                    loomShowTip(name, event);
-                }} else {{
-                    hoverTarget = null;
-                    loomHideTip();
-                }}
-            }}, true);
-            loomImg.addEventListener('pointerdown', loomHideTip);
-            loomImg.addEventListener('pointerleave', loomHideTip);
-
             // Size the viewer to the map's own aspect ratio, then apply
             // the initial (unzoomed) transform, so the whole map is
             // visible without needing to scroll first.
@@ -6732,86 +7424,6 @@ def display_loom_svg(
 
             loomImg.addEventListener('pointerup', loomStopDragging);
             loomImg.addEventListener('pointercancel', loomStopDragging);
-
-      function loomTriggerDownload(url, filename) {{
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      }}
-
-      // Export the bare transit map (same SVG displayed on screen).
-      async function loomDownloadSVG() {{
-        try {{
-          const res = await fetch(loomExportSvgDataUrl);
-          let blob = await res.blob();
-          if (window.loomEditHasChanges && window.loomEditHasChanges()) {{
-            blob = new Blob([window.loomEditApplyToSvgText(await blob.text())], {{ type: 'image/svg+xml' }});
-          }}
-          const url = URL.createObjectURL(blob);
-          loomTriggerDownload(url, 'loom_transit_map.svg');
-          setTimeout(() => URL.revokeObjectURL(url), 2000);
-        }} catch (e) {{
-          alert('SVG download failed: ' + e);
-        }}
-      }}
-
-      // PNG export rasterizes the composite SVG (map + title + legend +
-      // symbols), so the exported file matches the full panel.
-      async function loomDownloadPNG() {{
-        try {{
-          // Render at FULL-SCREEN-SIZE resolution: at least 3x the map's
-          // natural size, and wide enough to match a 1920px-wide screen,
-          // so the downloaded PNG is a crisp, whole-map poster image.
-          const scale = 4;
-
-          // Parse the explicit width/height out of the composite SVG so we
-          // never depend on naturalWidth (which some browsers report as 0
-          // for large SVG data URLs).
-          const svgText = atob(loomCompositeSvgDataUrl.split(',')[1]);
-          const wMatch = svgText.match(/width="([\\d.]+)/);
-          const hMatch = svgText.match(/height="([\\d.]+)/);
-          const fallbackW = wMatch ? parseFloat(wMatch[1]) : 1600;
-          const fallbackH = hMatch ? parseFloat(hMatch[1]) : 1200;
-
-          const tempImg = new Image();
-          tempImg.crossOrigin = 'anonymous';
-
-          tempImg.onload = function() {{
-            let w = tempImg.naturalWidth || fallbackW;
-            let h = tempImg.naturalHeight || fallbackH;
-            const canvas = document.createElement('canvas');
-            canvas.width = Math.round(w * scale);
-            canvas.height = Math.round(h * scale);
-            const ctx = canvas.getContext('2d');
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
-
-            canvas.toBlob(function(blob) {{
-              if (!blob) {{ alert('PNG export failed.'); return; }}
-              const url = URL.createObjectURL(blob);
-              loomTriggerDownload(url, 'loom_transit_map.png');
-              setTimeout(() => URL.revokeObjectURL(url), 2000);
-            }}, 'image/png');
-          }};
-
-          tempImg.onerror = function() {{
-            alert('PNG download failed: could not rasterize the composite SVG.');
-          }};
-
-          let pngSrc = loomCompositeSvgDataUrl;
-          if (window.loomEditHasChanges && window.loomEditHasChanges()) {{
-            const baseTxt = await (await fetch(loomCompositeSvgDataUrl)).text();
-            pngSrc = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(window.loomEditApplyToSvgText(baseTxt));
-          }}
-          tempImg.src = pngSrc;
-        }} catch (e) {{
-          alert('PNG download failed: ' + e);
-        }}
-      }}
 
       function loomFullscreen() {{
         const el = document.getElementById('loom-wrapper');
@@ -6875,6 +7487,9 @@ def display_loom_svg(
     </script>
     <script>{EDIT_PANEL_JS}</script>
     <script>{loom_edit_js}</script>
+    <script>{PRINT_KIT_JS}</script>
+    <script>{LOOM_PRINT_JS}</script>
+    <script>{LOOM_HOVER_JS}</script>
 
     """
     st.components.v1.html(html_code, height=900, scrolling=True)
@@ -7049,6 +7664,7 @@ def display_transit_map(fig, selected_routes, route_name_map, route_color_hex_ma
 
     transit_edit_key = hashlib.md5(plot_html.encode("utf-8")).hexdigest()[:12]
     transit_edit_js = TRANSIT_EDIT_JS.replace("__EDIT_KEY__", transit_edit_key)
+    transit_print_js = TRANSIT_PRINT_JS.replace("__LEGEND_JSON__", legend_rows_json)
 
     html_code = f"""
     <div id="transit-wrapper" style="position:relative; background:#ffffff;
@@ -7063,14 +7679,15 @@ def display_transit_map(fig, selected_routes, route_name_map, route_color_hex_ma
       </style>
       <div id="transit-toolbar" style="display:flex; gap:6px; align-items:center;
            flex-wrap:wrap; padding:6px 10px; background:#f3f4f6; border-bottom:1px solid #ddd;">
-        <span style="font-size:13px; color:#555; margin-right:auto;">Transit Map of Kathmandu Valley</span>
+        <span style="font-size:13px; color:#555; margin-right:auto;">{TITLE}</span>
         <button id="transit-edit-btn" onclick="window.transitEditToggle && window.transitEditToggle()"
                 title="Move, rotate and resize labels and icons"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
                        border:1px solid #1d4ed8; background:#fff; color:#1d4ed8;">✏️ Edit</button>
-        <button onclick="transitDownloadPNG()"
+        <button id="transit-print-btn" onclick="window.transitPrintOpen && window.transitPrintOpen()"
+                title="Print / export as SVG, PNG or PDF on A3 or A2"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
-                       border:1px solid #ccc; background:#fff;">⬇ PNG</button>
+                       border:1px solid #ccc; background:#fff;">🖨 Print</button>
         <button onclick="transitFullscreen()"
                 style="padding:4px 10px; cursor:pointer; border-radius:6px;
                        border:1px solid #ccc; background:#fff;">⛶ Full Screen</button>
@@ -7145,256 +7762,6 @@ def display_transit_map(fig, selected_routes, route_name_map, route_color_hex_ma
           tip.style.display = 'none';
         }});
       }})();
-
-      // Composites the Plotly map and the HTML legend into one PNG, so
-      // the legend actually shows up in the downloaded image -- Plotly's
-      // own export only rasterizes its own SVG canvas and never touches
-      // the legend overlay sitting on top of it.
-      function transitTriggerDownload(url, filename) {{
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      }}
-
-      async function transitDownloadPNG() {{
-        try {{
-          const gd = document.getElementById('transit-plot-div');
-          const legend = document.getElementById('transit-legend');
-          const container = document.getElementById('transit-plot-container');
-          if (!gd || !window.Plotly) {{
-            alert('The map is still loading -- try again in a moment.');
-            return;
-          }}
-
-          const scale = 2;
-          const w = container.offsetWidth;
-          const h = container.offsetHeight;
-          // The Plotly figure already renders its own title, so the export
-          // canvas is exactly the map + legend -- no extra title band.
-
-          const legendData = {legend_rows_json};
-
-          const mapDataUrl = await window.Plotly.toImage(
-            gd, {{ format: 'png', width: w, height: h, scale: scale }}
-          );
-
-          const mapImg = new Image();
-          mapImg.onload = function() {{
-            const canvas = document.createElement('canvas');
-            canvas.width = w * scale;
-            canvas.height = h * scale;
-            const ctx = canvas.getContext('2d');
-
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            ctx.drawImage(mapImg, 0, 0, w * scale, h * scale);
-
-            // Draw the legend box manually (html2canvas is unreliable here
-            // because Plotly injects malformed CSS selectors into the page).
-            // Column widths are measured from the actual text so long route
-            // names never spill into the Symbols column.
-            const fs = 13 * scale;
-            const headFs = 15 * scale;
-            const rowH = 20 * scale;
-            const gap = 8 * scale;
-            const colGap = 20 * scale;
-            const padX = 14 * scale;
-            const padTop = 12 * scale;
-            const glyphW = 26 * scale;
-
-            function textWAt(t, fontPx, weight) {{
-              ctx.font = (weight ? weight + ' ' : '') + fontPx + 'px Arial, sans-serif';
-              return ctx.measureText(t).width;
-            }}
-
-            // Greedy word-wrap: breaks `text` into lines that each fit
-            // within maxW at the currently-set ctx.font, so a long route
-            // name wraps inside its own column instead of overflowing
-            // into the neighboring one.
-            function wrapText(text, maxW) {{
-              const words = String(text).split(' ');
-              const lines = [];
-              let line = '';
-              words.forEach(function(word) {{
-                const test = line ? line + ' ' + word : word;
-                if (ctx.measureText(test).width > maxW && line) {{
-                  lines.push(line);
-                  line = word;
-                }} else {{
-                  line = test;
-                }}
-              }});
-              if (line) lines.push(line);
-              return lines.length ? lines : [''];
-            }}
-
-            function truncateText(text, maxW) {{
-              let t = String(text);
-              if (ctx.measureText(t).width <= maxW) return t;
-              while (t.length > 1 && ctx.measureText(t + '…').width > maxW) {{
-                t = t.slice(0, -1);
-              }}
-              return t + '…';
-            }}
-
-            // Flatten the agency groups into one route-per-column entry
-            // list, each column showing its agency name above a swatch +
-            // route name -- mirrors the on-screen legend's layout. Every
-            // column uses the SAME fixed width, and text wraps/truncates
-            // to fit inside it, so columns can never bleed into each other.
-            const agencyFs = 11 * scale;
-            const routeFs = fs;
-            const colW = 190 * scale;
-            const colGapX = 20 * scale;
-            const colGapY = 10 * scale;
-            const glyphW2 = 22 * scale;
-            const routesMaxRowW = 660 * scale;
-            const lineGap = 2 * scale;
-
-            const agencyLineH = agencyFs * 1.3;
-            const routeLineH = routeFs * 1.3;
-
-            const routeEntries = [];
-            legendData.groups.forEach(function(group) {{
-              group.routes.forEach(function(route) {{
-                ctx.font = agencyFs + 'px Arial, sans-serif';
-                const agencyText = truncateText(group.agency, colW);
-                ctx.font = routeFs + 'px Arial, sans-serif';
-                const nameLines = wrapText(route.name, colW - glyphW2);
-                routeEntries.push({{
-                  agencyText: agencyText,
-                  nameLines: nameLines,
-                  color: route.color,
-                  colW: colW,
-                  entryH: agencyLineH + 3 * scale
-                    + nameLines.length * routeLineH
-                    + (nameLines.length - 1) * lineGap,
-                }});
-              }});
-            }});
-
-            // Flow the fixed-width columns left-to-right, wrapping onto
-            // new rows; each row's height is set by its tallest entry.
-            const legendRows = [];
-            let curRow = [];
-            let curW = 0;
-            routeEntries.forEach(function(e) {{
-              const addW = colW + (curRow.length ? colGapX : 0);
-              if (curRow.length && curW + addW > routesMaxRowW) {{
-                legendRows.push(curRow);
-                curRow = [];
-                curW = 0;
-              }}
-              curW += colW + (curRow.length ? colGapX : 0);
-              curRow.push(e);
-            }});
-            if (curRow.length) legendRows.push(curRow);
-
-            const rowHeights = legendRows.map(function(r) {{
-              return Math.max.apply(null, r.map(function(e) {{ return e.entryH; }}));
-            }});
-
-            let colW1 = textWAt('Routes', headFs, '700');
-            legendRows.forEach(function(r) {{
-              const rowW = r.length * colW + (r.length - 1) * colGapX;
-              colW1 = Math.max(colW1, rowW);
-            }});
-            const routesBlockH = rowHeights.length
-              ? rowHeights.reduce(function(a, b) {{ return a + b; }}, 0)
-                + (rowHeights.length - 1) * colGapY
-              : 0;
-
-            // Measure Symbols column.
-            let colW2 = textWAt('Symbols', headFs, '700');
-            legendData.symbols.forEach(function(symbol) {{
-              colW2 = Math.max(colW2, glyphW + textWAt(symbol.label, fs));
-            }});
-            colW2 += glyphW;
-
-            const symbolsBlockH = legendData.symbols.length * rowH;
-            const boxW = padX * 2 + colW1 + colGap + colW2;
-            const boxH = padTop * 2 + headFs + gap + Math.max(routesBlockH, symbolsBlockH);
-            const boxX = 18 * scale;
-            const boxY = canvas.height - boxH - 14 * scale;
-
-            ctx.fillStyle = 'rgba(255,255,255,0.97)';
-            ctx.fillRect(boxX, boxY, boxW, boxH);
-            ctx.strokeStyle = '#d0d0d0';
-            ctx.lineWidth = 1 * scale;
-            ctx.strokeRect(boxX, boxY, boxW, boxH);
-
-            ctx.textAlign = 'left';
-            ctx.fillStyle = '#111111';
-            const x1 = boxX + padX;
-            const x2 = x1 + colW1 + colGap;
-            const headY = boxY + padTop + headFs;
-
-            ctx.font = '700 ' + headFs + 'px Arial, sans-serif';
-            ctx.fillText('Routes', x1, headY);
-            ctx.fillText('Symbols', x2, headY);
-
-            let yRow = headY + gap + agencyLineH * 0.8;
-            legendRows.forEach(function(r, rowIdx) {{
-              let xCol = x1;
-              r.forEach(function(e) {{
-                ctx.font = agencyFs + 'px Arial, sans-serif';
-                ctx.fillStyle = '#666666';
-                ctx.fillText(e.agencyText, xCol, yRow);
-
-                const swatchY = yRow + 3 * scale + routeLineH * 0.7;
-                ctx.fillStyle = e.color;
-                ctx.fillRect(xCol, swatchY - 4 * scale, 16 * scale, 4 * scale);
-                ctx.font = routeFs + 'px Arial, sans-serif';
-                ctx.fillStyle = '#222222';
-                e.nameLines.forEach(function(line, lineIdx) {{
-                  ctx.fillText(line, xCol + glyphW2, swatchY + lineIdx * (routeLineH + lineGap));
-                }});
-
-                xCol += e.colW + colGapX;
-              }});
-              yRow += rowHeights[rowIdx] + colGapY;
-            }});
-
-            ctx.font = fs + 'px Arial, sans-serif';
-            let yS = headY + gap + rowH * 0.75;
-            legendData.symbols.forEach(function(symbol) {{
-              const cx = x2 + 8 * scale;
-              if (symbol.type === 'line') {{
-                ctx.fillStyle = symbol.color;
-                ctx.fillRect(x2, yS - 5 * scale, 16 * scale, 4 * scale);
-              }} else if (symbol.type === 'circle') {{
-                ctx.beginPath();
-                ctx.arc(cx, yS - 3.5 * scale, symbol.radius * scale, 0, Math.PI * 2);
-                ctx.fillStyle = '#ffffff';
-                ctx.fill();
-                ctx.strokeStyle = symbol.color;
-                ctx.lineWidth = 2 * scale;
-                ctx.stroke();
-              }}
-              ctx.fillStyle = '#222222';
-              ctx.fillText(symbol.label, x2 + glyphW, yS);
-              yS += rowH;
-            }});
-
-            canvas.toBlob(function(blob) {{
-              if (!blob) {{ alert('PNG export failed.'); return; }}
-              const url = URL.createObjectURL(blob);
-              transitTriggerDownload(url, 'transit_map.png');
-              setTimeout(() => URL.revokeObjectURL(url), 2000);
-            }}, 'image/png');
-          }};
-          mapImg.onerror = function() {{
-            alert('PNG download failed: could not rasterize the map.');
-          }};
-          mapImg.src = mapDataUrl;
-        }} catch (e) {{
-          alert('PNG download failed: ' + e);
-        }}
-      }}
 
       function transitSetLegendFullWidth(on) {{
         const legend = document.getElementById('transit-legend');
@@ -7477,6 +7844,8 @@ def display_transit_map(fig, selected_routes, route_name_map, route_color_hex_ma
     </script>
     <script>{EDIT_PANEL_JS}</script>
     <script>{transit_edit_js}</script>
+    <script>{PRINT_KIT_JS}</script>
+    <script>{transit_print_js}</script>
     """
     st.components.v1.html(html_code, height=height + 130, scrolling=False)
 
@@ -7496,6 +7865,7 @@ img = img_to_base64("image1.jpeg")
 
 # Flags: set to True to bring back the banner / the charts and detail sections.
 SHOW_BANNER = True
+SHOW_KPI = True
 SHOW_EXTRA_SECTIONS = False
 
 if SHOW_BANNER:
@@ -7538,123 +7908,140 @@ if SHOW_BANNER:
                 </style>
 
                 <div class="hero-container">
-                    <img src="data:image/png;base64,{img}" class="hero-img">
-                    <div class="hero-title">KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</div>
+                    <img src="data:image/jpeg;base64,{img}" class="hero-img"
+                    style="display:block; width:100%; height:315px; max-width:none;
+                object-fit:cover; object-position:center;
+                border-radius:14px; margin:0 0 1.4rem 0;">
+                    <div class="hero-title">{CITY.upper()} MOBILITY INSIGHT DASHBOARD</div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
         else:
             st.markdown(
-                """
+                f"""
                 <div style="text-align: center; padding: 1rem 0;">
-                    <h1>KATHMANDU VALLEY MOBILITY INSIGHT DASHBOARD</h1>
-                    <p style="letter-spacing: 2px; opacity: 0.8;"> • KTM VALLEY  • GTFS FEED 2026</p>
+                    <h1>{CITY.upper()} MOBILITY INSIGHT DASHBOARD</h1>
+                    <p style="letter-spacing: 2px; opacity: 0.8;"> • {CITY.upper()}  • GTFS FEED 2026</p>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
 
-# ================= LOAD DATA =================
-df_cong = fetch_congestion()
-df_dur = route_durations()
-df_agency = routes_per_agency()
-df_start = fetch_starting_stops()
-kpi = fetch_kpi()
+if SHOW_KPI:
+    # ================= KPI CARDS (single row) =================
+    _base_cards = []
+    try:
+        _k = fetch_kpi()
+        _base_cards = [
+            (
+                "AGENCIES", f'{int(_k["agency"]):,}', "#22c55e",
+                "kpi-pill-green", "operators", "info", CITY,
+            ),
+            (
+                "ROUTES", f'{int(_k["routes"]):,}', "#ef4444",
+                "kpi-pill-red", "NETWORK", "info", CITY,
+            ),
+        ]
+    except Exception as _e:
+        st.warning(f"KPI cards unavailable for {CITY}: {_e}")
 
-longest = df_dur.loc[df_dur["duration"].idxmax()]
-shortest = df_dur.loc[df_dur["duration"].idxmin()]
+    _insight_cards = []
+    _congestion_card = None
+    try:
+        _agency_share = routes_per_agency()
+        if not _agency_share.empty:
+            _leader = _agency_share.iloc[0]
+            _insight_cards.append(
+                (
+                    "MARKET LEADER",
+                    str(_leader["agency_name"]),
+                    "#f59e0b",
+                    "kpi-pill-amber",
+                    f'{float(_leader["percentage"]):g}%',
+                    "up",
+                    "Highest route share",
+                )
+            )
+        else:
+            st.warning(f"Market-leader KPI unavailable for {CITY}: no agency route data.")
+    except Exception as _e:
+        st.warning(f"Market-leader KPI unavailable for {CITY}: {_e}")
 
-# ================= KPI CARDS =================
-with st.container(border=True):
-    c1, c2, c3, c4, c5, c6 = st.columns([1,1,1,2,2,2])
-    with c1:
-        st.markdown(f"""
-        <div class="kpi-card" style="--kpi-color:#3b82f6">
-        <div class="kpi-icon-row">
-                <span class="kpi-icon"></span>
-                <span class="kpi-pill">operators</span>
-            </div>
-            <div class="kpi-label">AGENCIES</div>
-            <div class="kpi-val">{kpi["agency"]}</div>
-            <div class="kpi-divider"></div>
-            <div class="kpi-sub info">● All active</div>
-        </div>
-        """, unsafe_allow_html=True)
+    try:
+        _durations = route_durations().dropna(subset=["duration"])
+        if not _durations.empty:
+            _longest = _durations.loc[_durations["duration"].idxmax()]
+            _shortest = _durations.loc[_durations["duration"].idxmin()]
+            for _label, _route in (
+                ("LONGEST ROUTE", _longest),
+                ("SHORTEST ROUTE", _shortest),
+            ):
+                _minutes = float(_route["duration"])
+                _insight_cards.append(
+                    (
+                        _label,
+                        str(_route["route_id"]),
+                        "#a78bfa" if _label == "LONGEST ROUTE" else "#22c55e",
+                        "kpi-pill-purple" if _label == "LONGEST ROUTE" else "kpi-pill-green",
+                        f"{_minutes:.0f} min",
+                        "purple" if _label == "LONGEST ROUTE" else "up",
+                        f"{int(_minutes) // 60}h {int(_minutes) % 60}m",
+                    )
+                )
+        else:
+            st.warning(f"Route-duration KPIs unavailable for {CITY}: no trip duration data.")
+    except Exception as _e:
+        st.warning(f"Route-duration KPIs unavailable for {CITY}: {_e}")
 
-    with c2:
-        st.markdown(f"""
-        <div class="kpi-card" style="--kpi-color:#14b8a6">
-            <div class="kpi-icon-row">
-                <span class="kpi-icon"></span>
-                <span class="kpi-pill">Network</span>
-            </div>
-            <div class="kpi-label">ROUTES</div>
-            <div class="kpi-val">{kpi["routes"]}</div>
-            <div class="kpi-divider"></div>
-            <div class="kpi-sub info">↑ Route Network</div>
-        </div>
-        """, unsafe_allow_html=True)
+    if CITY == "Kathmandu":
+        try:
+            _congestion = fetch_congestion().dropna(subset=["congestion_index"])
+            if not _congestion.empty:
+                _peak = _congestion.loc[_congestion["congestion_index"].idxmax()]
+                _congestion_card = (
+                    "PEAK CONGESTION",
+                    f'{float(_peak["congestion_index"]):.1f}',
+                    "#ef4444",
+                    "kpi-pill-red",
+                    "HIGH",
+                    "warn",
+                    f'Peak at {int(_peak["hour"]):02d}:00',
+                )
+            else:
+                st.warning("Peak-congestion KPI unavailable for Kathmandu: no GPS data.")
+        except Exception as _e:
+            st.warning(f"Peak-congestion KPI unavailable for Kathmandu: {_e}")
 
-    with c3:
-        cong_val = round(df_cong["congestion_index"].max(), 1)
-        st.markdown(f"""
-        <div class="kpi-card" style="--kpi-color:#ef4444">
-            <div class="kpi-icon-row">
-                <span class="kpi-icon"></span>
-                <span class="kpi-pill kpi-pill-red">HIGH</span>
-            </div>
-            <div class="kpi-label">PEAK CONGESTION</div>
-            <div class="kpi-val" style="color:#ef4444">{cong_val}</div>
-            <div class="kpi-divider"></div>
-            <div class="kpi-sub warn">⚠ 10 AM midday peak</div>
-        </div>
-        """, unsafe_allow_html=True)
+    _display_cards = _base_cards[:2]
+    if _congestion_card is not None:
+        _display_cards.append(_congestion_card)
+    _display_cards.extend(_insight_cards)
 
-    with c4:
-        leader      = df_agency.iloc[0]
-        leader_name = leader["agency_name"]
-        leader_pct  = leader["percentage"]
-        st.markdown(f"""
-        <div class="kpi-card" style="--kpi-color:#f59e0b">
-            <div class="kpi-icon-row">
-                <span class="kpi-icon"></span>
-                <span class="kpi-pill kpi-pill-amber">{leader_pct}%</span>
-            </div>
-            <div class="kpi-label">MARKET LEADER</div>
-            <div class="kpi-val kpi-val-sm">{leader_name}</div>
-            <div class="kpi-divider"></div>
-            <div class="kpi-sub up">↑ Highest route share</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c5:
-        st.markdown(f"""
-        <div class="kpi-card" style="--kpi-color:#a78bfa">
-            <div class="kpi-icon-row">
-                <span class="kpi-icon"></span>
-                <span class="kpi-pill kpi-pill-purple">{longest['duration']:.0f} min</span>
-            </div>
-            <div class="kpi-label">LONGEST ROUTE</div>
-            <div class="kpi-val kpi-val-sm">{longest['route_id']}</div>
-            <div class="kpi-divider"></div>
-            <div class="kpi-sub purple">🕐 {int(longest['duration'])//60}h {int(longest['duration'])%60}m</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c6:
-        st.markdown(f"""
-        <div class="kpi-card" style="--kpi-color:#22c55e">
-            <div class="kpi-icon-row">
-                <span class="kpi-icon"></span>
-                <span class="kpi-pill kpi-pill-green">{shortest['duration']:.1f} min</span>
-            </div>
-            <div class="kpi-label">SHORTEST ROUTE</div>
-            <div class="kpi-val kpi-val-sm">{shortest['route_id']}</div>
-            <div class="kpi-divider"></div>
-            <div class="kpi-sub up">↑ Most efficient</div>
-        </div>
-        """, unsafe_allow_html=True)
+    if _display_cards:
+        with st.container(border=True):
+            for _col, _card in zip(st.columns(len(_display_cards)), _display_cards):
+                (_label, _value, _color, _pill_class, _pill_value, _sub_class, _sub_text) = _card
+                _value_class = (
+                    "kpi-val"
+                    if _label in {"AGENCIES", "ROUTES", "PEAK CONGESTION"}
+                    else "kpi-val kpi-val-sm"
+                )
+                with _col:
+                    st.markdown(
+                        f"""
+                        <div class="kpi-card" style="--kpi-color:{_color};">
+                            <div class="kpi-icon-row">
+                                <span class="kpi-pill {_pill_class}">{html.escape(_pill_value)}</span>
+                            </div>
+                            <div class="kpi-label">{html.escape(_label)}</div>
+                            <div class="{_value_class}">{html.escape(_value)}</div>
+                            <div class="kpi-divider"></div>
+                            <div class="kpi-sub {_sub_class}">{html.escape(_sub_text)}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
 if SHOW_EXTRA_SECTIONS:
     col_filter, col_map1, col_map2 = st.columns([1.5, 3, 1.5])
@@ -7736,6 +8123,24 @@ with col_map1:
         with st.container(border=True):
             st.markdown("###### Route Map")
 
+            # One row:  City [dropdown]   (o) Live Map  ( ) Transit Map  ( ) LOOM Map
+            _hdr_widths = [0.55, 1.7, 6]
+            try:
+                hdr_lbl, hdr_city, hdr_view = st.columns(
+                    _hdr_widths, vertical_alignment="center"
+                )
+            except TypeError:  # older Streamlit without vertical_alignment
+                hdr_lbl, hdr_city, hdr_view = st.columns(_hdr_widths)
+            with hdr_lbl:
+                st.markdown("**City**")
+            with hdr_city:
+                st.selectbox(
+                    "City",
+                    list(CITIES),
+                    key="city_select",
+                    label_visibility="collapsed",
+                )
+
             # ================= CHECK ROUTES =================
             if not selected_routes:
 
@@ -7744,13 +8149,14 @@ with col_map1:
             else:
 
                 # ================= VIEW MODE TOGGLE (NEW FEATURE) =================
-                view_mode = st.radio(
-                    "View",
-                    ["🗺️ Live Map", "🚇 Transit Map", "🧵 LOOM Map (SVG)"],
-                    horizontal=True,
-                    key="map_view_mode",
-                    label_visibility="collapsed"
-                )
+                with hdr_view:
+                    view_mode = st.radio(
+                        "View",
+                        ["🗺️ Live Map", "🚇 Transit Map", "🧵 LOOM Map (SVG)"],
+                        horizontal=True,
+                        key="map_view_mode",
+                        label_visibility="collapsed"
+                    )
 
                 # Vector landmarks are always shown on the maps (no
                 # dashboard selector -- removal requested via Edit mode).
@@ -7766,7 +8172,7 @@ with col_map1:
                         intersection_df = common_stops(selected_routes)
 
                     # ================= BASE MAP =================
-                    m1 = folium.Map(location=[27.7, 85.3],zoom_start=12,tiles=None
+                    m1 = folium.Map(location=CITY_CFG["center"],zoom_start=CITY_CFG["zoom"],tiles=None
                     )
 
                     folium.TileLayer("OpenStreetMap",name="Openstreet",show=True
@@ -7947,7 +8353,7 @@ with col_map1:
                             value=True,
                             key="tm_show_road",
                             help="Draws the road network (from "
-                                 "data/trunk.geojson) underneath the "
+                                 "data/pokhara_ktm_road.geojson) underneath the "
                                  "route lines.",
                         )
 
@@ -7981,7 +8387,7 @@ with col_map1:
                         route_color_map,
                         route_name_map,
                         route_agency_map=route_agency_map,
-                        title_text="Transit Map of Kathmandu Valley",
+                        title_text=TITLE,
                         separate_overlapping_routes=tm_separate_routes,
                         route_spacing=tm_route_spacing,
                         label_density=tm_label_density,
@@ -8041,7 +8447,7 @@ with col_map1:
                         key="loom_show_road",
                         disabled=schematic,
                         help=(
-                            "Draws the road network (from data/trunk.geojson) "
+                            "Draws the road network (from data/pokhara_ktm_road.geojson) "
                             "with road names, like the Plotly transit map. "
                             "Roads are placed by real coordinates, so they are "
                             "only drawn on the geographic layout (turn "
@@ -8304,7 +8710,7 @@ with left_container:
             **Duration:** {sel['duration']:.1f} min
             """)
 
-            m_preview = folium.Map(location=[27.7, 85.3], zoom_start=12, tiles=None)
+            m_preview = folium.Map(location=CITY_CFG["center"], zoom_start=CITY_CFG["zoom"], tiles=None)
             folium.TileLayer("OpenStreetMap", name="OpenStreetMap", show=True).add_to(m_preview)
             geom = route_geom(selected_route_id)
 
